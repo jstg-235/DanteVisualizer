@@ -388,36 +388,45 @@ function toCanvas(e) {
   return { x: (e.clientX - r.left - state.view.x) / state.view.k, y: (e.clientY - r.top - state.view.y) / state.view.k };
 }
 
+// Dragging redraws the diagram on every move, which replaces the block's elements.
+// So the move/up listeners live on the window, not on the block being dragged.
+let dragging = false;
 function makeDraggable(handle, n) {
   handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
     e.stopPropagation();
+    e.preventDefault();
     const start = toCanvas(e);
-    const p = state.positions[state.mode][n.id];
-    const orig = { ...p };
+    const id = n.id, mode = state.mode;
+    const orig = { ...state.positions[mode][id] };
     let moved = false;
-    handle.setPointerCapture(e.pointerId);
+    dragging = true;
     const move = (ev) => {
       const c = toCanvas(ev);
       if (!moved && Math.hypot(c.x - start.x, c.y - start.y) < 4) return;
       moved = true;
+      const p = state.positions[mode][id];
       p.x = Math.round(orig.x + c.x - start.x);
       p.y = Math.round(orig.y + c.y - start.y);
       render();
     };
     const up = () => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", up);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      dragging = false;
       if (moved) persistLayout();
       else {
         // A click: select the device and toggle its channel list.
-        state.selected = n.id;
-        if (state.expanded.has(n.id)) state.expanded.delete(n.id); else state.expanded.add(n.id);
+        state.selected = id;
+        if (state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
         persistLayout();
         render();
       }
     };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", up);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   });
 }
 
@@ -548,7 +557,7 @@ async function poll() {
     const res = await fetch("api/snapshot", { cache: "no-store" });
     if (!res.ok) throw new Error(res.statusText);
     const model = await res.json();
-    if (JSON.stringify(model) !== JSON.stringify(state.model)) setModel(model);
+    if (!dragging && JSON.stringify(model) !== JSON.stringify(state.model)) setModel(model);
     if (model.source === "live") pollTimer = setTimeout(poll, 2000);
   } catch {
     if (!state.model) showStatus("Open a Dante Controller preset (.xml) or start the server to see your network.");
