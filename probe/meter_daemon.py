@@ -227,6 +227,9 @@ async def session():
                     log.info("interface %s is gone or no longer the Dante one; restarting", IFACE)
                     return "iface"
                 _, n2 = snapshot_state()
+                if snap_names is None and n2 is not None:
+                    log.info("snapshot appeared; restarting session to pick up every device")
+                    return "devices"
                 if n2 is not None and snap_names is not None and n2 != snap_names:
                     log.info("device set changed; restarting session")
                     return "devices"
