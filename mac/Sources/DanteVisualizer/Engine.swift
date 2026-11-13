@@ -69,10 +69,14 @@ final class Engine {
                 self.state = .starting
                 // A steady port keeps the page's saved layouts (stored per address) between launches.
                 self.port = Engine.freePort(preferred: Array(8770...8779))
-                self.usingDaemon = self.startDaemon()
+                // No Dante network yet still counts as daemon mode: the daemon is started
+                // (pinned to the port) as soon as one appears, and the server connects by itself.
+                let found = self.startDaemon(announce: true)
+                self.usingDaemon = found != .failed
                 self.daemonMetering = self.usingDaemon && metering
                 try self.startServer()
                 if metering { try self.startMeter() }
+                if found == .noNetwork { self.watchForDaemon() }
                 self.waitForServer()
             } catch {
                 self.state = .failed(error.localizedDescription)
@@ -181,22 +185,47 @@ final class Engine {
     /// Uses a netaudio daemon that's already running, or starts one (`netaudio daemon run`)
     /// on the Dante interface. Returns false if neither works within a few seconds; the app
     /// then runs the way it did before the daemon (snapshot refresh and metering helper).
-    private func startDaemon() -> Bool {
-        if Engine.daemonAnswers() { return true }
-        state = .settingUp("Starting the netaudio daemon…")
-        var args = ["daemon", "run"]
-        // Pin it to the Dante port: on some Macs it trips over other link-local ports otherwise.
-        if let iface = danteInterface() { args = ["--interface", iface] + args }
+    enum DaemonStart { case running, noNetwork, failed }
+
+    private func startDaemon(announce: Bool) -> DaemonStart {
+        if Engine.daemonAnswers() { return .running }
+        // Always pin it to the Dante port: unpinned it trips over other link-local ports
+        // ("join monitoring group … Address already in use"). No port yet: try again later.
+        guard let iface = danteInterface() else { return .noNetwork }
+        if announce { state = .settingUp("Starting the netaudio daemon…") }
         let exe = venvDir.appendingPathComponent("bin/netaudio")
-        guard let d = try? launch(exe, args, log: "daemon.log",
-                                  extraEnv: ["NETAUDIO_METERING_PORT": Engine.daemonMeteringPort]) else { return false }
+        guard let d = try? launch(exe, ["--interface", iface, "daemon", "run"], log: "daemon.log",
+                                  extraEnv: ["NETAUDIO_METERING_PORT": Engine.daemonMeteringPort]) else { return .failed }
         for _ in 0..<40 {
             if !d.isRunning { break }
-            if Engine.daemonAnswers() { daemon = d; return true }
+            if Engine.daemonAnswers() { daemon = d; return .running }
             Thread.sleep(forTimeInterval: 0.25)
         }
         if d.isRunning { d.terminate() }
-        return false
+        return .failed
+    }
+
+    /// The app started without a Dante network: look for one every 5 s and start the daemon
+    /// on it. If the daemon then can't run, fall back to the helper doing all the metering.
+    private var watchingDaemon = false
+    private func watchForDaemon() {
+        guard !watchingDaemon else { return }
+        watchingDaemon = true
+        DispatchQueue.global(qos: .utility).async {
+            defer { self.watchingDaemon = false }
+            while self.usingDaemon, self.server?.isRunning == true {
+                Thread.sleep(forTimeInterval: 5)
+                guard self.server?.isRunning == true else { return }
+                switch self.startDaemon(announce: false) {
+                case .running: return          // the server's feed connects and re-sends metering requests
+                case .noNetwork: continue
+                case .failed:
+                    self.usingDaemon = false
+                    if self.meter?.isRunning == true { self.stopMeterSync(); try? self.startMeter() }
+                    return
+                }
+            }
+        }
     }
 
     private func danteInterface() -> String? {
