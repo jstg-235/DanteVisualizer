@@ -310,3 +310,17 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .c-dev, .c-dev.sev-ok, .c-dev.sev-warning, .c-dev.sev-critical { background: none; }
 .c-devname { font-size: 12px; font-weight: 600; fill: var(--text); }
 .c-devsub { font-size: 10.5px; fill: var(--muted); font-family: var(--mono); }
+
+/* Click to trace: the clicked routes light up at both ends, a pinned card says where they go. */
+.wire-hit { fill: none; stroke: transparent; pointer-events: stroke; cursor: pointer; }
+.row-hit { fill: transparent; cursor: pointer; }
+.bundle-label { cursor: pointer; }
+.wire.traced, body.has-levels .wire.traced { opacity: 1; }
+.wire.single.traced, body.has-levels .wire.single.traced { stroke-width: 3; }
+.bundle-label.traced rect { stroke-width: 2.5; }
+.row-traced { fill: var(--accent); opacity: .16; }
+.row-traced.picked { opacity: .3; }
+.node .chan.traced { font-weight: 650; fill: var(--text); opacity: 1; }
+.tooltip.pinned { pointer-events: auto; padding-right: 30px; max-height: 60%; overflow: auto; }
+.tooltip .close { position: absolute; right: 4px; top: 4px; border: none; background: none; font-size: 16px; line-height: 1; padding: 2px 6px; color: var(--muted); }
+.tooltip .trace-list { margin-top: 4px; font-variant-numeric: tabular-nums; }

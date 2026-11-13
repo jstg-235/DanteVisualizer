@@ -20,6 +20,7 @@ const state = {
   view: { x: 40, y: 40, k: 1 },
   selected: null,                         // node id
   hoverRoute: null,
+  trace: null,           // what was clicked: {kind:'channel',device,side,ch} | {kind:'route',id} | {kind:'bundle',key}
   colors: new Map(),
   levels: null,                           // { device: { tx: [dB|null], rx: [dB|null], age } }
   badges: {},                             // from the monitor: { device: [{ kind: "clock"|"ip", severity, text }] }
@@ -223,6 +224,11 @@ function render() {
   const sel = state.selected;
   const selDevice = sel ? byId.get(sel)?.device.name : null;
   const related = (r) => !selDevice || r.srcDevice === selDevice || r.dstDevice === selDevice;
+  // A click on a channel, wire or bundle traces those routes: they light up, the rest fade.
+  const traced = tracedRoutes();
+  const tracing = !!traced;
+  const isTraced = (r) => traced?.has(r.id);
+  live.ends = tracing ? endsOf(traced) : null;
 
   // Group routes by block pair so collapsed blocks get one thick bundle.
   const groups = new Map();
@@ -237,12 +243,15 @@ function render() {
 
   for (const g of groups.values()) {
     const color = state.colors.get(g.srcName) || "#888";
-    const dim = selDevice && !g.routes.some(related);
+    const dim = tracing ? !g.routes.some(isTraced) : selDevice && !g.routes.some(related);
+    const lit = tracing && g.routes.some(isTraced);
+    const key = `${g.srcNode ? g.srcNode.id : "?" + g.srcName}=>${g.dstNode.id}`;
     if (!g.srcNode) {
       // Subscribed to a device that isn't on the network right now.
       const b = portPos(g.dstNode, "rx", g.routes[0].dstChannel);
       const a = { x: b.x - 90, y: b.y };
-      el("path", { d: `M${a.x},${a.y} L${b.x},${b.y}`, class: "wire missing" + (dim ? " dim" : "") }, wiresLayer);
+      const stub = el("path", { d: `M${a.x},${a.y} L${b.x},${b.y}`, class: "wire missing" + (dim ? " dim" : "") + (lit ? " traced" : "") }, wiresLayer);
+      clickable(stub, { kind: "bundle", key }, a, b, null);
       const t = el("text", { x: a.x - 6, y: a.y + 4, class: "wire-label missing-label", "text-anchor": "end" }, wiresLayer);
       t.textContent = `${g.srcName} (not found) · ${g.routes.length} ch`;
       continue;
@@ -253,15 +262,16 @@ function render() {
       const width = 2 + Math.log2(g.routes.length) * 1.6;
       const laneY = isBackward(a, b) ? floorBetween(ns, a.x, b.x) + 40 + 26 * lane++ : null;
       const failed = g.routes.filter((r) => r.failed).length;
-      const path = el("path", { d: curve(a, b, laneY), class: "wire bundle" + (dim ? " dim" : "") + (failed ? " failed" : ""), stroke: color, "stroke-width": width }, wiresLayer);
-      hoverBundle(path, g);
+      const d = curve(a, b, laneY);
+      const path = el("path", { d, class: "wire bundle" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : ""), stroke: color, "stroke-width": width }, wiresLayer);
+      clickable(path, { kind: "bundle", key }, null, null, d, Math.max(12, width + 6));
       const mid = placeLabel(path, placed);
-      const label = el("g", { class: "bundle-label" + (dim ? " dim" : "") + (failed ? " failed" : ""), transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
+      const label = el("g", { class: "bundle-label" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : ""), transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
       const text = `${g.routes.length} ch` + (failed ? ` · ${failed} failed` : "");
       el("rect", { x: -(text.length * 3.6 + 8), y: -10, width: text.length * 7.2 + 16, height: 20, rx: 10, stroke: color }, label);
       const t = el("text", { x: 0, y: 4, "text-anchor": "middle" }, label);
       t.textContent = text;
-      hoverBundle(label, g);
+      clickable(label, { kind: "bundle", key });
       live.bundles.push({ path, label, text: t, rect: label.firstChild, routes: g.routes, total: g.routes.length, failed });
     } else {
       const laneBase = floorBetween(ns, portPos(g.srcNode, "tx").x, portPos(g.dstNode, "rx").x) + 40 + 26 * lane;
@@ -271,8 +281,10 @@ function render() {
         const back = isBackward(a, b);
         usedLane ||= back;
         const hot = state.hoverRoute === r.id;
-        const path = el("path", { d: curve(a, b, back ? laneBase : null), class: "wire single" + (dim && !related(r) ? " dim" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : ""), stroke: color }, wiresLayer);
-        hoverRoute(path, r);
+        const d = curve(a, b, back ? laneBase : null);
+        const faded = tracing ? !isTraced(r) : dim && !related(r);
+        const path = el("path", { d, class: "wire single" + (faded ? " dim" : "") + (isTraced(r) ? " traced" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : ""), stroke: color }, wiresLayer);
+        clickable(path, { kind: "route", id: r.id }, null, null, d, 10);
         live.wires.push({ path, route: r });
       }
       if (usedLane) lane++;
@@ -284,6 +296,7 @@ function render() {
   updateExpandButton();
   viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
   renderPanel(byId);
+  updateTraceCard();
 }
 
 function drawNode(n, groups) {
@@ -340,16 +353,20 @@ function drawNode(n, groups) {
       const y = HEADER + i * ROW + ROW / 2 + 4;
       const routed = side === "rx" ? !!c.subDevice : state.routes.some((r) => r.srcDevice === d.name && r.srcChannel === c.id);
       const failed = side === "rx" && c.state === "error";
+      const end = live.ends?.has(`${d.name}|${side}|${c.id}`);
+      const picked = state.trace?.kind === "channel" && state.trace.device === d.name && state.trace.side === side && state.trace.ch === c.id;
+      if (end || picked) el("rect", { x: side === "rx" ? 6 : W / 2, y: y - ROW / 2, width: W / 2 - 6, height: ROW, rx: 4, class: "row-traced" + (picked ? " picked" : "") }, g);
       const label = el("text", {
         x: side === "rx" ? 22 : W - 22, y: y + 4, "text-anchor": side === "rx" ? "start" : "end",
-        class: "chan" + (routed ? "" : " unused") + (failed ? " failed" : ""),
+        class: "chan" + (routed ? "" : " unused") + (failed ? " failed" : "") + (end || picked ? " traced" : ""),
       }, g);
       label.textContent = `${c.id} ${shorten(c.name === String(c.id).padStart(2, "0") || c.name === String(c.id) ? "" : c.name, 16)}`.trim();
       el("circle", { cx: side === "rx" ? 0 : W, cy: y, r: routed ? 3 : 2, class: "port" + (routed ? "" : " unused") }, g);
       const dot = el("circle", { cx: side === "rx" ? 13 : W - 13, cy: y, r: 3.6, class: "sig" }, g);
       live.dots.push({ el: dot, device: d.name, side, ch: c.id });
-      label.addEventListener("mouseenter", (e) => showChannel(e, d, side, c));
-      label.addEventListener("mouseleave", hideTip);
+      // Click anywhere on the row (not just the text) to trace it.
+      const hit = el("rect", { x: side === "rx" ? 0 : W / 2, y: y - ROW / 2, width: W / 2, height: ROW, class: "row-hit" }, g);
+      clickable(hit, { kind: "channel", device: d.name, side, ch: c.id });
     });
     if (n.rx) rows(d.rx, "rx");
     if (n.tx) rows(d.tx, "tx");
@@ -490,36 +507,117 @@ function routeText(r) {
   const bad = r.failed ? `<br><b class="sev-text-critical">Route failed${r.stateLabel ? ": " + esc(r.stateLabel) : ""}</b>` : "";
   return `<b>${esc(r.srcDevice)}</b> out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span><br>→ <b>${esc(r.dstDevice)}</b> in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>${bad}${lv}`;
 }
-function hoverRoute(path, r) {
-  path.addEventListener("mouseenter", (e) => { path.classList.add("hot"); showTip(e, routeText(r)); });
-  path.addEventListener("mousemove", (e) => showTip(e, routeText(r)));
-  path.addEventListener("mouseleave", () => { path.classList.remove("hot"); hideTip(); });
-}
 function failedText(rs) {
   const f = rs.filter((r) => r.failed);
   if (!f.length) return "";
   const why = [...new Set(f.map((r) => r.stateLabel).filter(Boolean))].join(", ");
   return `<b class="sev-text-critical">${f.length} failed${why ? ": " + esc(why) : ""}</b> <span class="muted">(in ${rangeText(f.map((r) => r.dstChannel))})</span><br>`;
 }
-function hoverBundle(elm, g) {
-  const rs = g.routes;
-  const html = () => `<b>${esc(rs[0].srcDevice)}</b> → <b>${esc(rs[0].dstDevice)}</b> · ${rs.length} channels<br>
-    <span class="muted">out ${rangeText(rs.map((r) => r.srcChannel).filter((x) => x != null))} → in ${rangeText(rs.map((r) => r.dstChannel))}</span><br>
-    ${failedText(rs)}<span class="muted">Click either device to see each channel</span>`;
-  elm.addEventListener("mouseenter", (e) => showTip(e, html()));
-  elm.addEventListener("mousemove", (e) => showTip(e, html()));
-  elm.addEventListener("mouseleave", hideTip);
+// ---------- click to trace ----------
+// Nothing pops up on hover (it got in the way). A click on a channel row, a wire or a
+// bundle traces it: its routes light up at both ends, everything else fades, and a small
+// card says where the signal comes from and goes to. Click the background or press Esc to clear.
+function tracedRoutes() {
+  const t = state.trace;
+  if (!t || !state.model) return null;
+  let rs = [];
+  if (t.kind === "route") rs = state.routes.filter((r) => r.id === t.id);
+  else if (t.kind === "channel")
+    rs = state.routes.filter((r) => t.side === "rx" ? r.dstDevice === t.device && r.dstChannel === t.ch
+                                                     : r.srcDevice === t.device && r.srcChannel === t.ch);
+  else if (t.kind === "bundle") rs = state.routes.filter((r) => bundleKey(r) === t.key);
+  return new Set(rs.map((r) => r.id));
 }
-function showChannel(e, d, side, c) {
-  if (side === "rx") {
-    showTip(e, `<b>${esc(d.name)}</b> in ${c.id} <span class="muted">${esc(c.name)}</span>` + (state.levels ? ` · ${dbText(levelOf(d.name, "rx", c.id))}` : "") + `<br>` +
-      (c.subDevice ? `← ${esc(c.subDevice)} · ${esc(c.subChannel)}` : `<span class="muted">Not routed</span>`) +
-      (c.state === "error" ? `<br><b class="sev-text-critical">Route failed${c.stateLabel ? ": " + esc(c.stateLabel) : ""}</b>` : ""));
-  } else {
-    const dests = state.routes.filter((r) => r.srcDevice === d.name && r.srcChannel === c.id);
-    showTip(e, `<b>${esc(d.name)}</b> out ${c.id} <span class="muted">${esc(c.name)}</span>` + (state.levels ? ` · ${dbText(levelOf(d.name, "tx", c.id))}` : "") + `<br>` +
-      (dests.length ? dests.map((r) => `→ ${esc(r.dstDevice)} in ${r.dstChannel}`).join("<br>") : `<span class="muted">Not routed</span>`));
+function bundleKey(r) {
+  const dst = nodeIdFor(r.dstDevice, "rx");
+  const src = r.missing ? "?" + r.srcDevice : nodeIdFor(r.srcDevice, "tx");
+  return `${src}=>${dst}`;
+}
+function endsOf(ids) {
+  const ends = new Set();
+  for (const r of state.routes) if (ids.has(r.id)) {
+    ends.add(`${r.dstDevice}|rx|${r.dstChannel}`);
+    if (r.srcChannel != null) ends.add(`${r.srcDevice}|tx|${r.srcChannel}`);
   }
+  return ends;
+}
+// Make an element clickable for tracing. Thin wires get a wider invisible twin to click.
+function clickable(elm, trace, _a, _b, d, hitWidth) {
+  let target = elm;
+  if (d) {
+    target = el("path", { d, class: "wire-hit", "stroke-width": hitWidth || 10 }, elm.parentNode);
+    target.addEventListener("mouseenter", () => elm.classList.add("hot"));
+    target.addEventListener("mouseleave", () => elm.classList.remove("hot"));
+  }
+  target.addEventListener("pointerdown", (e) => e.stopPropagation());
+  target.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const same = JSON.stringify(state.trace) === JSON.stringify(trace);
+    state.trace = same ? null : trace;
+    traceCard.at = same ? null : { x: e.clientX, y: e.clientY };
+    render();
+  });
+}
+function clearTrace() {
+  if (!state.trace) return false;
+  state.trace = null;
+  traceCard.at = null;
+  render();
+  return true;
+}
+
+const traceCard = { at: null };
+function updateTraceCard() {
+  const ids = tracedRoutes();
+  if (!state.trace || (state.trace.kind !== "channel" && !ids?.size)) {
+    if (state.trace) state.trace = null;    // the route went away
+    tooltip.hidden = true;
+    return;
+  }
+  const rs = state.routes.filter((r) => ids.has(r.id));
+  const t = state.trace;
+  let html;
+  if (t.kind === "route") html = routeText(rs[0]);
+  else if (t.kind === "channel") html = channelText(t, rs);
+  else html = bundleText(rs);
+  tooltip.innerHTML = `<button class="close" aria-label="Close">×</button>` + html;
+  tooltip.classList.add("pinned");
+  tooltip.hidden = false;
+  tooltip.querySelector(".close").onclick = () => clearTrace();
+  if (traceCard.at) placeCard(traceCard.at);
+}
+function placeCard(at) {
+  const r = svg.getBoundingClientRect();
+  let x = at.x - r.left + 14, y = at.y - r.top + 14;
+  const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+  if (x + tw > r.width - 8) x = Math.max(8, at.x - r.left - tw - 14);
+  if (y + th > r.height - 8) y = Math.max(8, at.y - r.top - th - 14);
+  tooltip.style.left = x + "px";
+  tooltip.style.top = y + "px";
+}
+function channelText(t, rs) {
+  const d = state.model.devices.find((x) => x.name === t.device);
+  const c = d?.[t.side]?.find((x) => x.id === t.ch) || { id: t.ch, name: "" };
+  const lv = state.levels ? ` · ${dbText(levelOf(t.device, t.side, t.ch))}` : "";
+  if (t.side === "rx") {
+    const r = rs[0];
+    return `<b>${esc(t.device)}</b> in ${c.id} <span class="muted">${esc(c.name)}</span>${lv}<br>` +
+      (r ? `<span class="muted">Source:</span> ${esc(r.srcDevice)} out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span>` +
+           (r.missing ? ` <span class="muted">(not found)</span>` : "")
+         : `<span class="muted">Not routed</span>`) +
+      (r?.failed ? `<br><b class="sev-text-critical">Route failed${r.stateLabel ? ": " + esc(r.stateLabel) : ""}</b>` : "");
+  }
+  return `<b>${esc(t.device)}</b> out ${c.id} <span class="muted">${esc(c.name)}</span>${lv}<br>` +
+    (rs.length ? `<span class="muted">Destination${rs.length > 1 ? `s (${rs.length})` : ""}:</span><br>` +
+                 rs.map((r) => `→ ${esc(r.dstDevice)} in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>`).join("<br>")
+               : `<span class="muted">Not routed</span>`);
+}
+function bundleText(rs) {
+  const max = 12;
+  const lines = rs.slice(0, max).map((r) => `${r.srcChannel ?? "?"} ${esc(shorten(r.srcChannelName || "", 14))} → ${r.dstChannel} ${esc(shorten(r.dstChannelName || "", 14))}`);
+  return `<b>${esc(rs[0].srcDevice)}</b> → <b>${esc(rs[0].dstDevice)}</b> · ${rs.length} channel${rs.length > 1 ? "s" : ""}<br>` +
+    `<span class="muted">out ${rangeText(rs.map((r) => r.srcChannel).filter((x) => x != null))} → in ${rangeText(rs.map((r) => r.dstChannel))}</span><br>` +
+    failedText(rs) + `<div class="trace-list">${lines.join("<br>")}${rs.length > max ? `<br><span class="muted">… and ${rs.length - max} more</span>` : ""}</div>`;
 }
 
 // ---------- interaction ----------
@@ -587,7 +685,7 @@ svg.addEventListener("pointerdown", (e) => {
     svg.removeEventListener("pointermove", move);
     svg.removeEventListener("pointerup", up);
     svg.classList.remove("panning");
-    if (!moved && state.selected) { state.selected = null; render(); }
+    if (!moved && (state.selected || state.trace)) { state.selected = null; state.trace = null; traceCard.at = null; render(); }
   };
   svg.addEventListener("pointermove", move);
   svg.addEventListener("pointerup", up);
@@ -645,6 +743,7 @@ function updateExpandButton() {
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
   if (state.view$ !== "diagram") return;
+  if (e.key === "Escape") clearTrace();
   if (e.key === "e" || e.key === "E") $("btn-expand").click();
 });
 $("btn-expand").onclick = () => {
