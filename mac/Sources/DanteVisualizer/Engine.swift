@@ -113,7 +113,7 @@ final class Engine {
             URLSession.shared.dataTask(with: req).resume()
         }
         DispatchQueue.global().async {
-            if on, !self.meteringOn { try? self.startMeter() }
+            if on, !(self.meter?.isRunning ?? false) { try? self.startMeter() }   // the helper itself (meteringOn means the daemon in daemon mode)
             if !on { self.stopMeterSync() }
         }
     }
