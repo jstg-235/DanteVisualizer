@@ -47,6 +47,7 @@ To try the indicators without devices, add `--demo-levels` to a preset run.
 - **Network** view: each device appears once, inputs on the left and outputs on the right. Signal that goes back to a device on the left loops underneath the blocks in its own lane.
 - **Signal flow** view: each device is split into an Outputs block (left column) and an Inputs block (right column), so every wire runs left to right.
 - Routes between two devices are bundled into one wire labelled with the channel count. Click a block to open its channel list and draw every route to it. The side panel lists what it receives and sends as channel ranges.
+- **Expand all / Collapse all** (or press E) opens or closes every block's channel list.
 - Hover a wire or channel to see the exact route. Drag blocks to arrange them. Positions and opened blocks are remembered per network in the browser. **Auto layout** resets them.
 - Routes to a device that isn't on the network show as a dashed stub labelled "not found".
 - **Signal indicators** (when levels are available): each channel gets a dot that is green for signal, yellow above −6 dBFS and red at clip. Hollow dots mean no reading. Wires carrying signal light up and animate. Bundles show how many of their channels are live ("27/32 live"), and closed blocks show a count of channels with signal. Hover a wire or channel to see its level. Signal means −60 dBFS or louder.
