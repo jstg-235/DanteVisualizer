@@ -277,6 +277,7 @@ function render() {
 
   for (const n of ns) drawNode(n, groups);
   applyLevels();
+  updateExpandButton();
   viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
   renderPanel(byId);
 }
@@ -587,6 +588,16 @@ $("mode-network").onclick = () => setMode("network");
 $("mode-flow").onclick = () => setMode("flow");
 $("btn-layout").onclick = () => { autoLayout(); render(); fit(); };
 $("btn-fit").onclick = fit;
+// Label the button with what it will do next.
+function updateExpandButton() {
+  if (!state.model) return;
+  const allOpen = nodes().every((n) => state.expanded.has(n.id));
+  $("btn-expand").textContent = allOpen ? "Collapse all" : "Expand all";
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "e" || e.key === "E") $("btn-expand").click();
+});
 $("btn-expand").onclick = () => {
   const ns = nodes();
   const allOpen = ns.every((n) => state.expanded.has(n.id));
