@@ -414,11 +414,34 @@ function renderPanel(byId) {
     <button class="close" aria-label="Close">×</button>
     <h2>${esc(d.name)}</h2>
     <p class="muted">${esc([d.manufacturer, d.model].filter(Boolean).join(" "))}${d.sampleRate ? ` · ${d.sampleRate / 1000} kHz` : ""} · ${d.rx.length} in / ${d.tx.length} out</p>
+    ${canIdentify(d) ? `<p><button class="identify" title="Blink this device's identify LED so you can find it in the rack">Identify</button> <span class="muted identify-msg"></span></p>` : ""}
     <h3>Receiving from</h3>
     <ul>${[...into].map(([o, rs]) => row(o, rs, "in")).join("") || '<li class="muted">Nothing</li>'}</ul>
     <h3>Sending to</h3>
     <ul>${[...outOf].map(([o, rs]) => row(o, rs, "out")).join("") || '<li class="muted">Nothing</li>'}</ul>`;
   panel.querySelector(".close").onclick = () => { state.selected = null; render(); };
+  const idBtn = panel.querySelector(".identify");
+  if (idBtn) idBtn.onclick = () => identify(d.name, idBtn, panel.querySelector(".identify-msg"));
+}
+
+// ---------- identify ----------
+// Only on the live network through the netaudio daemon, and only for devices that support it.
+function canIdentify(d) {
+  return state.model?.source === "live" && state.model.via === "daemon" && d.online && d.canIdentify !== false;
+}
+async function identify(name, btn, msg) {
+  btn.disabled = true;
+  msg.textContent = "Sending…";
+  try {
+    const res = await fetch("api/identify", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    msg.textContent = res.ok ? "Look for the blinking light" : `Couldn't identify: ${data.error || res.statusText}`;
+  } catch {
+    msg.textContent = "Couldn't reach the server";
+  }
+  setTimeout(() => { btn.disabled = false; }, 3000);
 }
 function groupBy(list, f) {
   const m = new Map();
@@ -621,7 +644,7 @@ document.addEventListener("drop", async (e) => {
 function openFileText(text, filename = "") {
   try {
     if (text.trimStart().startsWith("{")) openSetup(JSON.parse(text), filename);
-    else { stopPolling(); setModel(parsePresetXml(text)); }
+    else { goOffline(); setModel(parsePresetXml(text)); }
   } catch (err) { showStatus(err.message || String(err), true); }
 }
 
@@ -675,7 +698,7 @@ function openSetup(setup, filename) {
     if (setup.view) state.view = { ...setup.view };
     persistLayout();
   };
-  const live = state.model?.source === "live" && pollTimer;
+  const live = state.model?.source === "live" && live$.wanted;
   if (live) {
     // Keep showing the live network, arranged the way the setup says.
     // Devices the setup doesn't know about are placed below the others.
@@ -684,7 +707,7 @@ function openSetup(setup, filename) {
     render();
     showStatus(`Live: ${state.model.name} · laid out from "${setup.name}" (${known}/${state.model.devices.length} devices matched)`);
   } else {
-    stopPolling();
+    goOffline();
     setModel({ ...setup.network, source: "setup", name: setup.name || setup.network.name }, { keepLayout: true });
     applyLayout();
     render();
@@ -706,7 +729,8 @@ function setModel(model, { keepLayout = false } = {}) {
   }
   document.body.classList.add("loaded");
   const missing = state.routes.filter((r) => r.missing).length;
-  showStatus(`${{ live: "Live", setup: "Saved setup" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
+  const via = model.via === "daemon" ? " (instant updates)" : "";
+  showStatus(`${{ live: "Live" + via, setup: "Saved setup", offline: "Offline" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
   render();
   if (first && !keepLayout) fit();
 }
@@ -717,41 +741,170 @@ function showStatus(text, error = false) {
   s.classList.toggle("error", error);
 }
 
+// ---------- live / offline ----------
+// Live: following the network (devices, routes and signal levels).
+// Offline: a still picture of the last live view, a preset or a saved setup; nothing is polled,
+// and in the Mac app the devices are asked to stop sending levels.
+const STALE_MS = 60000;           // a snapshot older than this is "last seen", not live
+const live$ = {
+  wanted: true,                   // the toggle: follow the network?
+  available: null,                // does this server have a live network? null = don't know yet
+  lastOk: 0,                      // when the server last answered with the live network
+  searching: false,               // live server is up but hasn't found devices yet
+};
+
+function liveFresh() {
+  if (state.model?.source !== "live") return false;
+  if (Date.now() - live$.lastOk > 40000) return false;            // server not answering
+  if (state.model.via === "daemon") return true;                   // pushed the moment it changes
+  const t = Date.parse(state.model.capturedAt || "");
+  return !t || Date.now() - t < STALE_MS;
+}
+
+function updateLiveButton() {
+  const b = $("btn-live");
+  const label = b.querySelector(".live-label");
+  let cls, text, title;
+  if (!live$.wanted) {
+    cls = "off"; text = "Offline";
+    title = live$.available === false
+      ? "No live network here: open the app or start the server on a computer on the Dante network"
+      : "Showing a still view, a preset or a saved setup. Click to follow the live network.";
+  } else if (state.model?.source === "live" && liveFresh()) {
+    cls = "on"; text = "Live"; title = "Following the live network. Click to freeze this view and go offline.";
+  } else if (state.model?.source === "live") {
+    const t = new Date(Math.min(Date.parse(state.model.capturedAt || "") || live$.lastOk, live$.lastOk || Infinity));
+    cls = "stale"; text = `Live · last seen ${t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    title = "The network hasn't answered for a while (cable out, or the wrong network port?). Click to go offline.";
+  } else {
+    cls = "wait"; text = live$.searching ? "Looking for devices…" : "Connecting…";
+    title = "Waiting for the live network. Click to stay offline.";
+  }
+  b.className = "live-btn " + cls;
+  b.disabled = live$.available === false && !live$.wanted;
+  b.setAttribute("aria-pressed", String(live$.wanted));
+  b.title = title;
+  if (label.textContent !== text) label.textContent = text;
+}
+
+// Tell the Mac app (if this page is inside it) so it can start or stop metering.
+function tellApp(on) {
+  try { window.webkit?.messageHandlers?.dv?.postMessage({ live: on }); } catch {}
+}
+
+function goOffline() {
+  if (!live$.wanted) return;
+  live$.wanted = false;
+  stopPolling();
+  stopLevels();
+  state.levels = null;
+  applyLevels();
+  if (state.model?.source === "live") {
+    // Keep the last live picture on screen, without signal indicators.
+    state.model = { ...state.model, source: "offline", frozenAt: new Date().toISOString() };
+    setModel(state.model, { keepLayout: true });
+  }
+  tellApp(false);
+  updateLiveButton();
+}
+
+function goLive() {
+  if (live$.wanted) return;
+  live$.wanted = true;
+  tellApp(true);
+  updateLiveButton();
+  poll();
+  pollLevels();
+}
+
+$("btn-live").onclick = () => (live$.wanted ? goOffline() : goLive());
+setInterval(updateLiveButton, 5000);
+
 let pollTimer = null;
-function stopPolling() { clearTimeout(pollTimer); pollTimer = null; }
+function stopPolling() { clearTimeout(pollTimer); pollTimer = null; pollGen++; }
+let pollGen = 0;                  // bumps on stop, so a request still in flight is ignored
+// With the netaudio daemon behind the server, each request waits until the network changes
+// (long poll on the model's version), so routes and devices update the moment they change.
+// Otherwise the server's snapshot is re-read every 2 s.
 async function poll() {
+  clearTimeout(pollTimer);
+  const gen = pollGen;
+  const live = state.model?.source === "live";
+  const wait = live && state.model.via === "daemon" ? `?wait=${state.model.version}` : "";
+  const again = (ms) => { if (gen === pollGen && live$.wanted) pollTimer = setTimeout(poll, ms); };
   try {
-    const res = await fetch("api/snapshot", { cache: "no-store" });
+    const res = await fetch("api/snapshot" + wait, { cache: "no-store" });
+    if (gen !== pollGen || !live$.wanted) return;   // went offline meanwhile
+    if (res.status === 503) {
+      // The live server is up but hasn't found the network yet (just started, or switching ports).
+      live$.available = true;
+      live$.searching = true;
+      if (!state.model) showStatus("Looking for Dante devices…");
+      updateLiveButton();
+      return again(2000);
+    }
     if (!res.ok) throw new Error(res.statusText);
     const model = await res.json();
-    // Redraw only when the network itself changed, not just the capture time.
-    const same = (a, b) => a && b && JSON.stringify({ ...a, capturedAt: 0 }) === JSON.stringify({ ...b, capturedAt: 0 });
-    if (!dragging && !same(model, state.model)) setModel(model);
-    if (model.source === "live") pollTimer = setTimeout(poll, 2000);
+    if (gen !== pollGen || !live$.wanted) return;
+    live$.searching = false;
+    if (model.source !== "live") {
+      // A server showing a fixed preset: nothing to follow.
+      live$.available = false;
+      live$.wanted = false;
+      if (!state.model) setModel(model);
+      updateLiveButton();
+      return;
+    }
+    live$.available = true;
+    live$.lastOk = Date.now();
+    // Redraw only when the network itself changed, not just the capture time or version.
+    const same = (a, b) => a && b && JSON.stringify({ ...a, capturedAt: 0, version: 0 }) === JSON.stringify({ ...b, capturedAt: 0, version: 0 });
+    if (dragging) return again(300); // apply after the drag, without losing the change
+    if (!same(model, state.model)) setModel(model);
+    else Object.assign(state.model, { version: model.version, capturedAt: model.capturedAt });
+    updateLiveButton();
+    again(model.via === "daemon" ? 0 : 2000);
   } catch {
-    if (!state.model) showStatus("Open a Dante Controller preset (.xml) or start the server to see your network.");
+    if (gen !== pollGen) return;
+    if (!state.model && live$.available === null) {
+      // No server (opened from a file) or one without a network: offline until one is opened.
+      live$.available = false;
+      live$.wanted = false;
+      showStatus("Open a Dante Controller preset (.xml) or start the server to see your network.");
+    } else {
+      again(3000);
+    }
+    updateLiveButton();
   }
 }
 
 // Poll signal levels several times a second when the server provides them.
 let levelsMisses = 0;
+let levelsTimer = null;
+function stopLevels() { clearTimeout(levelsTimer); levelsTimer = null; }
 async function pollLevels() {
+  clearTimeout(levelsTimer);
   let delay = 250;
   try {
     const res = await fetch("api/levels", { cache: "no-store" });
+    if (!live$.wanted) return;
     if (res.status === 404) { state.levels = null; applyLevels(); return; } // server has no levels feed
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
+    if (!live$.wanted) return;
     state.levels = data.devices || {};
     levelsMisses = 0;
     if (!dragging) applyLevels();
   } catch {
+    if (!live$.wanted) return;
     if (++levelsMisses > 8) { state.levels = null; applyLevels(); delay = 3000; }
   }
-  setTimeout(pollLevels, delay);
+  levelsTimer = setTimeout(pollLevels, delay);
 }
 
 setMode(state.mode);
+updateLiveButton();
+tellApp(true);   // the app may still have metering off from before a reload
 poll();
 pollLevels();
 window.addEventListener("resize", () => render());

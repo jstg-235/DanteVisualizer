@@ -1,15 +1,23 @@
 import Foundation
 
-/// Runs the Python side of the app: the diagram server (which also refreshes the
-/// network snapshot) and the metering helper. Everything is read-only towards the
-/// devices except the metering start/stop requests the helper sends.
+/// Runs the Python side of the app: the netaudio daemon, the diagram server, and (only
+/// when the daemon can't run) the snapshot refresh and metering helper.
+///
+/// With the daemon (the normal case) the server follows its live event stream, so routes,
+/// devices and levels update the moment they change, and the page can ask a device to
+/// blink its identify LED. The metering helper then only listens, for devices whose levels
+/// the daemon doesn't pass on. Without the daemon, the server re-reads a snapshot every 10 s
+/// and the helper does all the metering, as before.
+///
+/// Towards the devices this sends only metering start/stop (as Dante Controller does)
+/// and identify, when someone presses Identify.
 ///
 /// Layout:
 ///   <App>.app/Contents/Resources/engine/   web/, server/, probe/, requirements.txt (read-only)
 ///   ~/Library/Application Support/Dante Visualizer/
 ///       venv/        Python environment with netaudio, made on first launch
 ///       data/        live_snapshot.json, levels.json
-///       logs/        server.log, meter.log, setup.log
+///       logs/        server.log, daemon.log, meter.log, setup.log
 final class Engine {
     enum State: Equatable { case idle, settingUp(String), starting, running, failed(String) }
 
@@ -22,7 +30,15 @@ final class Engine {
 
     private(set) var port: Int = 0
     private var server: Process?
+    private var stoppingAll = false
     private var meter: Process?
+    private var daemon: Process?          // nil when there's no daemon or it was already running
+    private(set) var usingDaemon = false
+    private var daemonMetering = false
+    static let daemonPort = 4780
+    /// Dante Controller holds the standard metering port (8752), and the daemon won't start
+    /// without its own. 8762 is the metering helper's.
+    static let daemonMeteringPort = "8772"
     var onState: ((State) -> Void)?
     private(set) var state: State = .idle { didSet { let s = state; DispatchQueue.main.async { self.onState?(s) } } }
 
@@ -42,20 +58,61 @@ final class Engine {
 
     var url: URL { URL(string: "http://127.0.0.1:\(port)/")! }
 
+    /// The network port to use for Dante, or nil to find it automatically.
+    /// Passed to the engine scripts as DANTE_IF.
+    var interfaceOverride: String? {
+        get { UserDefaults.standard.string(forKey: "danteInterface") }
+        set { UserDefaults.standard.set(newValue, forKey: "danteInterface") }
+    }
+
+    /// The port the current snapshot came from (what Automatic picked), if known.
+    var interfaceInUse: String? {
+        let url = dataDir.appendingPathComponent("live_snapshot.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let iface = obj["interface"] as? [String: Any] else { return nil }
+        return iface["name"] as? String
+    }
+
+    /// Switch to another network port: stop everything (devices get "stop metering"),
+    /// forget the old network's snapshot and levels, and start again on the new port.
+    func switchInterface(to name: String?, metering: Bool) {
+        interfaceOverride = name
+        stop {
+            for f in ["live_snapshot.json", "levels.json"] {
+                try? FileManager.default.removeItem(at: self.dataDir.appendingPathComponent(f))
+            }
+            self.start(metering: metering)
+        }
+    }
+
     // MARK: start / stop
 
     func start(metering: Bool) {
+        stoppingAll = false
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 for d in [self.dataDir, self.logsDir] {
                     try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
                 }
                 try self.ensurePythonEnvironment()
+                // A snapshot left over from another port would show the wrong network as live.
+                if let want = self.interfaceOverride, let had = self.interfaceInUse, had != want {
+                    for f in ["live_snapshot.json", "levels.json"] {
+                        try? FileManager.default.removeItem(at: self.dataDir.appendingPathComponent(f))
+                    }
+                }
                 self.state = .starting
                 // A steady port keeps the page's saved layouts (stored per address) between launches.
                 self.port = Engine.freePort(preferred: Array(8770...8779))
+                // No Dante network yet still counts as daemon mode: the daemon is started
+                // (pinned to the port) as soon as one appears, and the server connects by itself.
+                let found = self.startDaemon(announce: true)
+                self.usingDaemon = found != .failed
+                self.daemonMetering = self.usingDaemon && metering
                 try self.startServer()
                 if metering { try self.startMeter() }
+                if found == .noNetwork { self.watchForDaemon() }
                 self.waitForServer()
             } catch {
                 self.state = .failed(error.localizedDescription)
@@ -66,23 +123,38 @@ final class Engine {
     /// Stops the helper first with SIGINT so it sends "stop metering" to every device,
     /// then the server. Calls `done` on the main queue when both have exited (max ~4 s).
     func stop(done: @escaping () -> Void) {
+        stoppingAll = true
         DispatchQueue.global().async {
             self.stopMeterSync()
             if let s = self.server, s.isRunning {
-                s.terminate()
-                Engine.wait(for: s, seconds: 2)
+                s.terminate()                   // SIGTERM: with the daemon, the server releases metering first
+                Engine.wait(for: s, seconds: 4)
                 if s.isRunning { kill(s.processIdentifier, SIGKILL) }
             }
             self.server = nil
+            if let d = self.daemon, d.isRunning {
+                d.interrupt()
+                Engine.wait(for: d, seconds: 3)
+                if d.isRunning { d.terminate() }
+            }
+            self.daemon = nil
             DispatchQueue.main.async(execute: done)
         }
     }
 
-    var meteringOn: Bool { meter?.isRunning ?? false }
+    var meteringOn: Bool { usingDaemon ? daemonMetering : (meter?.isRunning ?? false) }
 
     func setMetering(_ on: Bool) {
+        if usingDaemon {
+            daemonMetering = on
+            var req = URLRequest(url: url.appendingPathComponent("api/metering"))
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["on": on])
+            URLSession.shared.dataTask(with: req).resume()
+        }
         DispatchQueue.global().async {
-            if on, !self.meteringOn { try? self.startMeter() }
+            if on, !(self.meter?.isRunning ?? false) { try? self.startMeter() }   // the helper itself (meteringOn means the daemon in daemon mode)
             if !on { self.stopMeterSync() }
         }
     }
@@ -103,18 +175,20 @@ final class Engine {
         env["DV_DATA"] = dataDir.path
         env["DV_ENGINE"] = engineDir.path
         env["PYTHONUNBUFFERED"] = "1"
+        if let iface = interfaceOverride { env["DANTE_IF"] = iface } else { env.removeValue(forKey: "DANTE_IF") }
         // Apps launched from Finder get a minimal PATH.
         env["PATH"] = [venvDir.appendingPathComponent("bin").path, "/usr/local/bin", "/opt/homebrew/bin",
                        "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
         return env
     }
 
-    private func launch(_ exe: URL, _ args: [String], log name: String) throws -> Process {
+    private func launch(_ exe: URL, _ args: [String], log name: String,
+                        extraEnv: [String: String] = [:]) throws -> Process {
         let p = Process()
         p.executableURL = exe
         p.arguments = args
         p.currentDirectoryURL = engineDir
-        p.environment = environment
+        p.environment = environment.merging(extraEnv) { _, new in new }
         let logURL = logsDir.appendingPathComponent(name)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: logURL)
@@ -126,23 +200,107 @@ final class Engine {
 
     private func startServer() throws {
         let probe = engineDir.appendingPathComponent("probe")
-        server = try launch(venvPython, [
+        var args = [
             engineDir.appendingPathComponent("server/serve.py").path,
+            // The snapshot and its refresh stay as the fallback whenever the daemon is unreachable.
             "--snapshot", dataDir.appendingPathComponent("live_snapshot.json").path,
             "--refresh-cmd", "\"\(probe.appendingPathComponent("refresh_snapshot.sh").path)\"",
             "--refresh", "10",
-            "--levels", dataDir.appendingPathComponent("levels.json").path,
             "--port", String(port),
-        ], log: "server.log")
+        ]
+        args += ["--levels", dataDir.appendingPathComponent("levels.json").path]
+        if usingDaemon {
+            args += ["--daemon", "http://127.0.0.1:\(Engine.daemonPort)"]
+            if daemonMetering { args.append("--metering") }
+        }
+        server = try launch(venvPython, args, log: "server.log")
         server?.terminationHandler = { [weak self] p in
-            guard let self, self.state == .running || self.state == .starting else { return }
+            guard let self, !self.stoppingAll, self.state == .running || self.state == .starting else { return }
             self.state = .failed("The diagram server stopped (exit \(p.terminationStatus)). See logs/server.log.")
         }
     }
 
+    /// Uses a netaudio daemon that's already running, or starts one (`netaudio daemon run`)
+    /// on the Dante interface. Returns false if neither works within a few seconds; the app
+    /// then runs the way it did before the daemon (snapshot refresh and metering helper).
+    enum DaemonStart { case running, noNetwork, failed }
+
+    private func startDaemon(announce: Bool) -> DaemonStart {
+        if Engine.daemonAnswers() { return .running }
+        // Always pin it to the Dante port: unpinned it trips over other link-local ports
+        // ("join monitoring group … Address already in use"). No port yet: try again later.
+        guard let iface = danteInterface() else { return .noNetwork }
+        if announce { state = .settingUp("Starting the netaudio daemon…") }
+        let exe = venvDir.appendingPathComponent("bin/netaudio")
+        guard let d = try? launch(exe, ["--interface", iface, "daemon", "run"], log: "daemon.log",
+                                  extraEnv: ["NETAUDIO_METERING_PORT": Engine.daemonMeteringPort]) else { return .failed }
+        for _ in 0..<40 {
+            if !d.isRunning { break }
+            if Engine.daemonAnswers() { daemon = d; return .running }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        if d.isRunning { d.terminate() }
+        return .failed
+    }
+
+    /// The app started without a Dante network: look for one every 5 s and start the daemon
+    /// on it. If the daemon then can't run, fall back to the helper doing all the metering.
+    private var watchingDaemon = false
+    private func watchForDaemon() {
+        guard !watchingDaemon else { return }
+        watchingDaemon = true
+        DispatchQueue.global(qos: .utility).async {
+            defer { self.watchingDaemon = false }
+            while self.usingDaemon, self.server?.isRunning == true {
+                Thread.sleep(forTimeInterval: 5)
+                guard self.server?.isRunning == true else { return }
+                switch self.startDaemon(announce: false) {
+                case .running: return          // the server's feed connects and re-sends metering requests
+                case .noNetwork: continue
+                case .failed:
+                    self.usingDaemon = false
+                    if self.meter?.isRunning == true { self.stopMeterSync(); try? self.startMeter() }
+                    return
+                }
+            }
+        }
+    }
+
+    private func danteInterface() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = [engineDir.appendingPathComponent("probe/dante_iface.sh").path]
+        p.environment = environment
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        let name = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.terminationStatus == 0 && !name.isEmpty ? name : nil
+    }
+
+    static func daemonAnswers() -> Bool {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(daemonPort)/devices")!)
+        req.timeoutInterval = 0.5
+        let sem = DispatchSemaphore(value: 0)
+        var ok = false
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            ok = (resp as? HTTPURLResponse)?.statusCode == 200
+            sem.signal()
+        }.resume()
+        sem.wait()
+        return ok
+    }
+
+    /// Without the daemon the helper does all the metering. With it, the helper only listens
+    /// (--dry-run, sends nothing) for devices that announce signal presence in their
+    /// heartbeats, which the daemon doesn't pass on (e.g. Fourier, Universal Audio).
     private func startMeter() throws {
         let script = engineDir.appendingPathComponent("probe/run_meter_daemon.sh")
-        meter = try launch(URL(fileURLWithPath: "/bin/zsh"), [script.path], log: "meter.log")
+        meter = try launch(URL(fileURLWithPath: "/bin/zsh"), [script.path] + (usingDaemon ? ["--dry-run"] : []),
+                           log: "meter.log")
     }
 
     private func waitForServer() {
