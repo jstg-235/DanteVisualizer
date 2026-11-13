@@ -30,6 +30,7 @@ Run via run_meter_daemon.sh (sets DANTE_IF / PYTHONPATH=shim). Files live in $DV
 """
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -174,6 +175,8 @@ async def session():
         ip_to_name.clear()
         ip_to_name.update(snapshot_ips())
         targets = []
+        net = iface_network(IFACE)
+        skipped = []
         for server_name, d in devices.items():
             if not d.ipv4:
                 continue
@@ -183,10 +186,15 @@ async def session():
                 continue  # passive levels in heartbeats, no request needed
             if d.detailed_metering_supported is False:
                 continue
+            if net is not None and ipaddress.ip_address(str(d.ipv4)) not in net:
+                skipped.append(name)   # announced here but on another subnet: unreachable from this port
+                continue
             targets.append((server_name, d, name))
         # forget devices that left
         discovered = {d.name or k.removesuffix(".local.") for k, d in devices.items() if d.ipv4}
         missed = set(snap_names or ()) - discovered
+        if skipped:
+            log.info("not metering %s: not on %s's subnet %s", ", ".join(skipped), IFACE, net)
         if missed:
             log.info("discovery missed %s; will retry discovery in 20 s", ", ".join(sorted(missed)))
         for gone in set(levels) - set(ip_to_name.values()):
@@ -266,6 +274,19 @@ async def stats_logger():
         rates = {n: (c - last.get(n, 0)) / 10 for n, c in stats.items()}
         last = dict(stats)
         log.info("packets/s: %s", ", ".join(f"{n} {r:.1f}" for n, r in sorted(rates.items())))
+
+
+def iface_network(name):
+    """The port's IPv4 network (from ifconfig's netmask), or None."""
+    for line in os.popen(f"ifconfig {name} 2>/dev/null"):
+        f = line.split()
+        if f[:1] == ["inet"] and "netmask" in f:
+            try:
+                mask = ipaddress.IPv4Address(int(f[f.index("netmask") + 1], 16))   # ifconfig prints 0xffffff00
+                return ipaddress.ip_network(f"{f[1]}/{mask}", strict=False)
+            except Exception:
+                return None
+    return None
 
 
 def iface_ipv4(name):
