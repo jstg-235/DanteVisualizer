@@ -1,5 +1,8 @@
 """The brain: combines Dante discovery, the clock, pings and switch data,
 decides what counts as a problem, and keeps the event history.
+
+From Dante Monitor 1.1. In Dante Visualizer it runs inside the diagram server
+(server/serve.py, --monitor-data) and follows the network port the app picked.
 """
 import json
 import os
@@ -52,7 +55,7 @@ class EventLog:
 
 
 class Config:
-    DEFAULTS = {"interface_ip": "", "switches": [], "notifications": True, "switch_poll_seconds": 10}
+    DEFAULTS = {"interface_ip": "", "switches": [], "notifications": False, "switch_poll_seconds": 10}
 
     def __init__(self, path):
         self.path = path
@@ -92,6 +95,8 @@ class Engine:
         self.port_devices = {}   # (switch id, ifIndex) -> device name
         self.ping_pool = ThreadPoolExecutor(max_workers=16)
         self.running = False
+        self.follow_ip = None    # the port Dante Visualizer is using (see follow_interface)
+        self.auto_ip = None
 
     # --------------------------------------------------------------- control
     def start(self):
@@ -108,6 +113,8 @@ class Engine:
         if self.demo:
             self.discovery, self.ptp = self.demo.discovery, self.demo.ptp
             return
+        if not ip:
+            ip = self.follow_ip
         if not ip:
             # Automatic: prefer a link-local (169.254.x.x) port - Dante's default addressing.
             ll = [i for i in netutil.list_interfaces() if i["ip"].startswith("169.254.")]
@@ -132,6 +139,32 @@ class Engine:
             time.sleep(1.2)
             self._start_listeners()
         self.log("info", "monitor", "Dante Monitor", "Listening on network interface %s." % (ip or "auto"))
+
+    def follow_interface(self, ip):
+        """Listen on the port Dante Visualizer is using, unless one was chosen in the
+        monitor's own settings. Restarts the listeners only when the port changes."""
+        if self.demo or not ip or ip == self.follow_ip or self.config.data.get("interface_ip"):
+            return
+        self.follow_ip = ip
+        if ip == self.auto_ip or not self.running:
+            return
+        if self.discovery:
+            self.discovery.stop()
+        if self.ptp:
+            self.ptp.stop()
+        time.sleep(1.2)
+        self._start_listeners()
+        self.log("info", "monitor", "Dante Monitor", "Listening on the Dante network port %s." % ip)
+
+    def stop(self):
+        self.running = False
+        for mon in self.switches.values():
+            mon.stop()
+        if not self.demo:
+            if self.discovery:
+                self.discovery.stop()
+            if self.ptp:
+                self.ptp.stop()
 
     def _start_switch(self, sw):
         client = self.demo.switch_client(sw) if self.demo else None
@@ -219,8 +252,10 @@ class Engine:
         clock = self.ptp.snapshot(now) if self.ptp else {"v1_active": [], "v2_active": [], "v1_sources": []}
         new_issues = {}
 
-        def issue(key, severity, subject, message):
-            new_issues[key] = {"key": key, "severity": severity, "subject": subject, "message": message}
+        def issue(key, severity, subject, message, devices=None):
+            # devices: which Dante devices the problem is about, so the app can point at them.
+            new_issues[key] = {"key": key, "severity": severity, "subject": subject, "message": message,
+                               "devices": devices if devices is not None else [subject]}
 
         # PTP v1 identifies devices by MAC address - another way to learn MACs
         for s in clock.get("v1_sources", []) + clock.get("followers", []):
@@ -289,7 +324,8 @@ class Engine:
 
             for ip, names in ip_owner.items():
                 if len(names) > 1:
-                    issue("ip:%s" % ip, "critical", ip, "IP address conflict: %s all use %s." % (", ".join(names), ip))
+                    issue("ip:%s" % ip, "critical", ip, "IP address conflict: %s all use %s." % (", ".join(names), ip),
+                          devices=names)
 
             # --- sample rate consistency
             rates = {}
@@ -300,7 +336,7 @@ class Engine:
                 summary = "; ".join("%s Hz: %s" % (k, ", ".join(v[:6]) + ("..." if len(v) > 6 else ""))
                                     for k, v in sorted(rates.items()))
                 issue("rates", "warning", "Sample rates", "Devices are not all at the same sample rate (" + summary +
-                      "). Devices at different rates can't share audio.")
+                      "). Devices at different rates can't share audio.", devices=[])
 
             # --- clock
             active = clock.get("v1_active", [])
@@ -316,10 +352,10 @@ class Engine:
             if len(active) > 1 and now - self.multi_since >= 5:
                 issue("clock:multi", "critical", "Clock", "%d devices are all acting as clock leader (%s). "
                       "This causes clicks and dropouts - check preferred-leader settings and network splits."
-                      % (len(active), ", ".join(s["name"] for s in active)))
+                      % (len(active), ", ".join(s["name"] for s in active)), devices=[s["name"] for s in active])
             if not active and rows and (now - self.started) > 15:
                 if clock.get("listening"):
-                    issue("clock:none", "critical", "Clock", "No clock leader heard on the network.")
+                    issue("clock:none", "critical", "Clock", "No clock leader heard on the network.", devices=[])
             leader_name = leader["name"] if leader else None
             # Remember the last single leader, so a change is reported even if there was a gap
             # (no leader, or several) in between.
@@ -341,7 +377,8 @@ class Engine:
                     rec["t"] = now
                 if s.get("jitter_ms") is not None and s["jitter_ms"] > 5:
                     issue("clock:jitter", "warning", "Clock", "Clock messages from %s are arriving unevenly "
-                          "(jitter %.1f ms). Possible network congestion or QoS not set up." % (s["name"], s["jitter_ms"]))
+                          "(jitter %.1f ms). Possible network congestion or QoS not set up." % (s["name"], s["jitter_ms"]),
+                          devices=[s["name"]])
             for r in rows:
                 if leader and r["ip"] == leader["ip"]:
                     r["is_leader"] = True
@@ -350,7 +387,8 @@ class Engine:
             switches = [m.snapshot() for m in self.switches.values()]
             for sw in switches:
                 if sw["reachable"] is False:
-                    issue("switch:%s:down" % sw["id"], "critical", sw["label"], "Not answering SNMP: %s" % (sw["error"] or ""))
+                    issue("switch:%s:down" % sw["id"], "critical", sw["label"], "Not answering SNMP: %s" % (sw["error"] or ""),
+                          devices=[])
                 for p in sw["ports"]:
                     p["device"] = ""
                     for r in rows:
