@@ -16,7 +16,8 @@
     <button id="btn-expand" title="Show or hide every channel">Channels</button>
     <button id="btn-layout" title="Rearrange the blocks automatically">Auto layout</button>
     <button id="btn-fit" title="Zoom to fit">Fit</button>
-    <label class="file-btn" title="Open a Dante Controller preset">Open preset…<input id="file" type="file" accept=".xml,application/xml,text/xml"></label>
+    <label class="file-btn" title="Open a Dante Controller preset (.xml) or a saved setup (.json)">Open…<input id="file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
+    <button id="btn-save" title="Save this layout, opened channels, view and network to a file">Save setup</button>
     <span id="status" class="status"></span>
   </header>
   <main>
@@ -29,7 +30,7 @@
       </g>
     </svg>
     <div id="empty" class="empty">
-      <p><b>Drop a Dante Controller preset here</b>, or use Open preset.</p>
+      <p><b>Drop a Dante Controller preset or a saved setup here</b>, or use Open.</p>
       <p class="muted">When the server is running on a Mac on the Dante network, the live network appears here automatically.</p>
     </div>
     <aside id="panel" class="panel" hidden></aside>
