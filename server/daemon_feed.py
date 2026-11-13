@@ -310,10 +310,15 @@ class DaemonFeed:
             with self.cond:
                 if not self.connected:
                     continue
-                # Accepted but no levels for 10 s (e.g. the Mac's address changed under the daemon):
-                # forget it so it is asked again below.
+                # Was sending levels through the daemon, then went quiet for 10 s (e.g. the Mac's
+                # address changed under the daemon): forget it so it is asked again below.
+                # Devices that never send through the daemon (their levels come from heartbeats
+                # via the helper) are left alone, so they aren't asked every 10 s forever.
                 for sn in list(self._metered):
-                    last = max(self._metered_at.get(sn, 0), (self.meters.get(sn) or {}).get("t", 0))
+                    m = self.meters.get(sn)
+                    if not m:
+                        continue
+                    last = max(self._metered_at.get(sn, 0), m.get("t", 0))
                     if now - last > 10:
                         self._metered.discard(sn)
                         self.log(f"no levels from {sn} for 10 s; asking again")
