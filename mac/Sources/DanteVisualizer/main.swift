@@ -5,11 +5,12 @@ import WebKit
 // local diagram server and the metering helper. This file is the window, menus and
 // the bits of WebKit glue a browser normally provides (file open/save dialogs).
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, NSMenuDelegate {
     let engine = Engine()
     var window: NSWindow!
     var web: WKWebView!
     var meteringItem: NSMenuItem!
+    var networkMenu: NSMenu!
     var quitting = false
 
     private var meteringPref: Bool {
@@ -40,6 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         engine.onState = { [weak self] state in self?.engineChanged(state) }
         engine.start(metering: meteringPref)
         NSApp.activate(ignoringOtherApps: true)
+        // Keep the title showing which port Automatic is using.
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self, case .running = self.engine.state else { return }
+            self.updateTitle()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
@@ -63,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             showStatus("Setting up (first launch only)", detail: msg)
         case .running:
             web.load(URLRequest(url: engine.url))
+            updateTitle()
             meteringItem.state = engine.meteringOn ? .on : .off
         case .failed(let msg):
             showStatus("Something went wrong", detail: msg + "\n\nLogs: " + engine.logsDir.path, error: true)
@@ -134,12 +141,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         meteringItem = item("Live Signal Levels", #selector(toggleMetering), "m", [.command, .shift])
         meteringItem.state = meteringPref ? .on : .off
         menu("Signal", [meteringItem])
+        // Network: pick the port the Dante devices are on. Rebuilt each time it opens.
+        let networkItem = NSMenuItem(title: "Network", action: nil, keyEquivalent: "")
+        networkMenu = NSMenu(title: "Network")
+        networkMenu.delegate = self
+        networkItem.submenu = networkMenu
+        main.addItem(networkItem)
         let windowMenu = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
         windowMenu.submenu = NSMenu(title: "Window")
         windowMenu.submenu!.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         main.addItem(windowMenu)
         NSApp.windowsMenu = windowMenu.submenu
         NSApp.mainMenu = main
+    }
+
+    // MARK: network picker
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === networkMenu else { return }
+        menu.removeAllItems()
+        let chosen = engine.interfaceOverride
+        let inUse = engine.interfaceInUse
+        let auto = NSMenuItem(title: "Automatic" + (chosen == nil && inUse != nil ? " (using \(inUse!))" : ""),
+                              action: #selector(pickNetwork(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.state = chosen == nil ? .on : .off
+        menu.addItem(auto)
+        menu.addItem(.separator())
+        let header = NSMenuItem(title: "Use this port for Dante:", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        var names = Set<String>()
+        for i in NetInterface.all() {
+            names.insert(i.name)
+            let item = NSMenuItem(title: i.menuTitle, action: #selector(pickNetwork(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = i.name
+            item.state = chosen == i.name ? .on : .off
+            menu.addItem(item)
+        }
+        if let chosen, !names.contains(chosen) {
+            // The remembered port isn't connected right now; keep showing it as the choice.
+            let item = NSMenuItem(title: "\(chosen)  ·  not connected", action: #selector(pickNetwork(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = chosen
+            item.state = .on
+            menu.addItem(item)
+        }
+    }
+
+    @objc func pickNetwork(_ sender: NSMenuItem) {
+        let name = sender.representedObject as? String
+        guard name != engine.interfaceOverride else { return }
+        showStatus("Switching network…", detail: name.map { "Looking for Dante devices on \($0)." } ?? "Looking for Dante devices on any port.")
+        engine.switchInterface(to: name, metering: meteringPref)
+    }
+
+    private func updateTitle() {
+        let using = engine.interfaceOverride ?? engine.interfaceInUse
+        window.title = "Dante Visualizer" + (using.map { " — \($0)" + (engine.interfaceOverride == nil ? " (automatic)" : "") } ?? "")
     }
 
     /// Menu commands press the matching button in the page, so the page stays the one source of behaviour.

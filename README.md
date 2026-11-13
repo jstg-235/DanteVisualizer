@@ -19,6 +19,7 @@ The app only reads the network. It never changes routes or settings.
 
 - The first launch builds a Python environment with netaudio in `~/Library/Application Support/Dante Visualizer/venv`. That needs Python 3.10 or newer from python.org and an internet connection once.
 - Logs: **Dante Visualizer → Show Logs in Finder**.
+- **Network** menu: **Automatic** (the default) finds the port the Dante devices are on. On a Mac with several networks, pick the port yourself; the choice is remembered. Switching stops metering on the old network first. The window title shows the port in use.
 - Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
 - It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
 

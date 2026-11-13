@@ -722,6 +722,12 @@ function stopPolling() { clearTimeout(pollTimer); pollTimer = null; }
 async function poll() {
   try {
     const res = await fetch("api/snapshot", { cache: "no-store" });
+    if (res.status === 503) {
+      // The live server is up but hasn't found the network yet (just started, or switching ports).
+      if (!state.model) showStatus("Looking for Dante devices…");
+      pollTimer = setTimeout(poll, 2000);
+      return;
+    }
     if (!res.ok) throw new Error(res.statusText);
     const model = await res.json();
     // Redraw only when the network itself changed, not just the capture time.
