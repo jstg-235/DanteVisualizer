@@ -222,11 +222,11 @@ async def session():
                         if isinstance(r, Exception):
                             log.warning("metering_start failed for %s: %s", t[2], r)
                     next_renew = now + args.renew
-                # device set or interface changed?
-                i2, n2 = snapshot_state()
-                if i2 and i2 != IFACE:
-                    log.info("interface changed %s -> %s", IFACE, i2)
+                # port gone, or (Automatic) snapshot moved to another port?
+                if interface_gone():
+                    log.info("interface %s is gone or no longer the Dante one; restarting", IFACE)
                     return "iface"
+                _, n2 = snapshot_state()
                 if n2 is not None and snap_names is not None and n2 != snap_names:
                     log.info("device set changed; restarting session")
                     return "devices"
@@ -265,12 +265,20 @@ async def stats_logger():
         log.info("packets/s: %s", ", ".join(f"{n} {r:.1f}" for n, r in sorted(rates.items())))
 
 
+def iface_ipv4(name):
+    for line in os.popen(f"ifconfig {name} 2>/dev/null"):
+        if line.strip().startswith("inet "):
+            return line.split()[1]
+    return None
+
+
 def interface_gone():
-    """True when this helper should restart on another interface: ours has disappeared,
-    or the snapshot now comes from a different one."""
-    present = os.popen("ifconfig -l").read().split()
-    if IFACE not in present:
+    """True when this helper should restart: our port has disappeared or lost its IPv4 address,
+    or (on Automatic only) the snapshot now comes from a different port."""
+    if iface_ipv4(IFACE) is None:
         return True
+    if os.environ.get("DANTE_IF_FIXED"):
+        return False  # the user chose this port: never follow the snapshot elsewhere
     snap_iface, _ = snapshot_state()
     return bool(snap_iface and snap_iface != IFACE)
 

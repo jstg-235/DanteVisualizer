@@ -81,6 +81,12 @@ final class Engine {
                     try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
                 }
                 try self.ensurePythonEnvironment()
+                // A snapshot left over from another port would show the wrong network as live.
+                if let want = self.interfaceOverride, let had = self.interfaceInUse, had != want {
+                    for f in ["live_snapshot.json", "levels.json"] {
+                        try? FileManager.default.removeItem(at: self.dataDir.appendingPathComponent(f))
+                    }
+                }
                 self.state = .starting
                 // A steady port keeps the page's saved layouts (stored per address) between launches.
                 self.port = Engine.freePort(preferred: Array(8770...8779))
