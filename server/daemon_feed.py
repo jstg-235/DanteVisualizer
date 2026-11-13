@@ -60,6 +60,7 @@ def model_from_netaudio(devs):
                 "subDevice": (s.get("tx_device") or "") if routed else "",
                 "subChannel": s["tx_channel"] if routed else "",
                 "state": (s.get("status") or {}).get("state") if routed else None,
+                "stateLabel": (s.get("status") or {}).get("label") if routed else None,
             })
         devices.append({
             "name": name,

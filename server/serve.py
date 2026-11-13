@@ -16,10 +16,16 @@ Data sources (pick one):
                         Devices, routes and levels then update the moment they change. Can be combined
                         with --snapshot (and --refresh-cmd, --levels), which are used whenever the
                         daemon isn't reachable.
+  --monitor-data DIR    Run the Monitor view's engine (from Dante Monitor): pings, clock, switches,
+                        problem history. Settings and history are kept in DIR. Its data is served
+                        under /api/monitor/ on this same port.
+  --monitor-demo        A pretend network with staged problems, for the diagram and the Monitor
+                        view together. Needs no other source.
 
 Never changes routes or settings. With --daemon, two things reach devices on request:
 POST /api/identify blinks one device's identify LED, and POST /api/metering asks devices
 to send levels (the same non-persistent request Dante Controller sends).
+The monitor only listens, pings devices and reads switches over SNMP (read-only).
 
   python3 server/serve.py --preset "samples/HY4 Network preset.xml"
   open http://127.0.0.1:8770
@@ -152,13 +158,21 @@ def demo_levels(model):
 
 
 class Source:
-    def __init__(self, args, feed=None):
+    def __init__(self, args, feed=None, monitor=None):
         self.args = args
         self.feed = feed
+        self.monitor = monitor
         self.lock = threading.Lock()
         self.model = None
         self.mtime = None
         self.error = None
+
+    def interface(self):
+        """The Dante network port in use: the app's choice, else the one the probe found."""
+        if os.environ.get("DANTE_IF"):
+            return os.environ["DANTE_IF"]
+        self.live_name()
+        return getattr(self, "_iface", (None, None))[1]
 
     def live_name(self):
         iface = None
@@ -174,6 +188,8 @@ class Source:
         return "Live network" + (f" ({iface})" if iface else "")
 
     def get(self):
+        if self.monitor and self.monitor.world and not (self.feed or self.args.preset or self.args.snapshot):
+            return self.monitor.demo_model()
         if self.feed:
             model, version = self.feed.snapshot()
             if model is not None:
@@ -223,10 +239,12 @@ def main():
     ap.add_argument("--refresh", type=float, default=5.0, help="seconds between refreshes (default 5)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument("--monitor-data", metavar="DIR", help="run the Monitor view's engine, keeping its data in DIR")
+    ap.add_argument("--monitor-demo", action="store_true", help="pretend network with staged problems")
     args = ap.parse_args()
     if args.refresh_cmd and not args.snapshot:
         ap.error("--refresh-cmd needs --snapshot")
-    if not (args.preset or args.snapshot or args.daemon):
+    if not (args.preset or args.snapshot or args.daemon or args.monitor_demo):
         ap.error("one of --preset, --snapshot or --daemon is required")
     if args.daemon and args.preset:
         ap.error("--daemon can't be combined with --preset")
@@ -234,7 +252,23 @@ def main():
     feed = DaemonFeed(args.daemon, log=lambda m: print(m, flush=True)).start() if args.daemon else None
     if feed and args.metering:
         feed.set_metering(True)
-    source = Source(args, feed)
+    monitor = None
+    if args.monitor_data or args.monitor_demo:
+        from monitor_api import MonitorService
+        data = args.monitor_data or str(Path(__file__).resolve().parent.parent / "monitor-data")
+        monitor = MonitorService(data, demo=args.monitor_demo, daemon_url=args.daemon,
+                                 log=lambda m: print(m, flush=True)).start()
+    source = Source(args, feed, monitor)
+    if monitor and not args.monitor_demo:
+        def follow():
+            # Keep the monitor on the same Dante port as the diagram (Network menu or automatic).
+            while True:
+                try:
+                    monitor.follow_interface(source.interface())
+                except Exception as e:  # never take the server down over this
+                    print(f"monitor: {e}", flush=True)
+                time.sleep(10)
+        threading.Thread(target=follow, daemon=True, name="monitor-follow").start()
     if args.refresh_cmd:
         threading.Thread(target=refresher, args=(args.refresh_cmd, args.refresh), daemon=True).start()
 
@@ -270,6 +304,9 @@ def main():
             body = self.read_json()
             if not isinstance(body, dict):
                 return self.send_json(400, {"error": "expected a JSON object"})
+            if path.startswith("/api/monitor/"):
+                res = monitor.post(path, body) if monitor else (503, {"error": "the monitor isn't running"})
+                return self.send_json(*(res or (404, {"error": "not found"})))
             if not feed:
                 return self.send_json(503, {"error": "needs the netaudio daemon (--daemon)"})
             if path == "/api/identify":
@@ -292,7 +329,23 @@ def main():
                     "daemon": bool(feed and feed.connected),
                     "metering": bool(feed and feed.metering),
                     "canIdentify": bool(feed and feed.connected),
+                    "monitor": bool(monitor),
                 })
+            if path.startswith("/api/monitor/"):
+                res = monitor.get(path, urllib.parse.parse_qs(query)) if monitor else None
+                if res is None:
+                    return self.send_json(404, {"error": "the monitor isn't running" if not monitor else "not found"})
+                status, body, ctype = res
+                if ctype is None:
+                    return self.send_json(status, body)
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Disposition", 'attachment; filename="dante-monitor-history.csv"')
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path == "/api/snapshot" and feed:
                 # Long poll: ?wait=<version> holds the request until the network changes (max 25 s).
                 wait = urllib.parse.parse_qs(query).get("wait", [None])[0]
@@ -356,6 +409,8 @@ def main():
     finally:
         if feed and feed.metering:
             feed.set_metering(False)
+        if monitor:
+            monitor.stop()
 
 
 if __name__ == "__main__":

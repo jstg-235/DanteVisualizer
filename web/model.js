@@ -7,7 +7,8 @@
 //   devices: [{
 //     name, model, manufacturer, sampleRate, online,
 //     tx: [{ id, name }],                       // id = Dante channel number
-//     rx: [{ id, name, subDevice, subChannel }] // subDevice/subChannel empty when unrouted
+//     rx: [{ id, name, subDevice, subChannel, state?, stateLabel? }] // subDevice/subChannel empty when unrouted;
+//                                               // state "error" = the subscription failed
 //   }],
 //   levels?: { [deviceName]: { tx: number[], rx: number[] } } // step 3
 // }
@@ -75,6 +76,9 @@ export function buildRoutes(model) {
         dstChannel: rx.id,
         dstChannelName: rx.name,
         missing: !src || !tx,
+        // The receiver reports the subscription as failed (netaudio state "error").
+        failed: rx.state === "error",
+        stateLabel: rx.stateLabel || "",
       });
     }
   }

@@ -209,6 +209,8 @@ final class Engine {
             "--port", String(port),
         ]
         args += ["--levels", dataDir.appendingPathComponent("levels.json").path]
+        // The Monitor view (pings, clock, switches, problem history) runs in the same server.
+        args += ["--monitor-data", supportDir.appendingPathComponent("Monitor").path]
         if usingDaemon {
             args += ["--daemon", "http://127.0.0.1:\(Engine.daemonPort)"]
             if daemonMetering { args.append("--metering") }

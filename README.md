@@ -11,6 +11,7 @@ A whole-network, signal-flow view of a Dante audio network, as an alternative to
 | 3 | Make it live: online/offline, route changes, signal indicators | Done |
 | 4 | Standalone Mac app | In progress (`mac/`) |
 | 5 | Instant updates from the netaudio daemon, Identify button | Done |
+| 6 | Monitor view (Dante Monitor folded in): problems, devices, clock, switches, cables, history | Done |
 
 The app never changes routes or settings. The only requests it sends to devices are metering start/stop (the same non-persistent request Dante Controller sends) and identify, when you press **Identify**.
 
@@ -28,6 +29,19 @@ The app never changes routes or settings. The only requests it sends to devices 
 - **Network** menu: **Automatic** (the default) finds the port the Dante devices are on. On a Mac with several networks, pick the port yourself; the choice is remembered. Switching stops metering on the old network first. The window title shows the port in use.
 - Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
 - It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
+
+## Monitor view
+
+**Monitor** (next to **Diagram** at the top left) is Dante Monitor, built in. It runs inside the diagram server and shares its port, its network and its picture of the devices. It only listens and reads: it pings devices, listens to the Dante clock and reads switches over SNMP, and never changes anything on them.
+
+- **Problems**: everything wrong right now, from the monitor's own checks (device offline, unstable ping, switch port down or erroring, slow link, IP conflict, mixed sample rates, clock trouble) and from the netaudio daemon's issues (clock sync, address conflicts, failed subscriptions and more). Click a device name to jump to it on the diagram.
+- **Devices** (ping, loss, IP, MAC, switch port), **Clock** (leader, sync timing, every device sending clock), **Switches** (every port's link, speed, load and errors), **History** (one timeline with CSV export) and **Setup** (switches, notifications).
+- **Cables**: the physical view. Each switch with every Dante device above the port it's plugged into. A cable with no link is red, one with recent errors amber, a link under 1 Gb/s is labelled, and the busier the port the thicker the cable. Switches that see each other over LLDP are joined.
+- The **problem count** next to **Live** opens a slim sidebar over the diagram with the problems and the clock leader.
+- The diagram itself only gets two things from the monitor: **failed routes are drawn red** (hover for the reason), and devices with a **clock or IP problem get a badge** on their block.
+- The monitor follows the **Network** menu. Mac notifications are **off** by default (Setup). It listens to the clock on ports 319/320; if Dante Virtual Soundcard holds them, the Clock tab says so (to revisit before release).
+- Settings and history live in `~/Library/Application Support/Dante Visualizer/Monitor`. The first run carries over the switch list and history from the standalone Dante Monitor app, if it was used.
+- Try it without devices: `python3 server/serve.py --monitor-demo --demo-levels`, then open http://127.0.0.1:8770. The demo stages a bad cable, a device dropping off, a clock fight and a sample-rate mismatch in turn, and has one failed route.
 
 ## Engine (`probe/`)
 

@@ -9,16 +9,21 @@
 <body>
   <header class="bar">
     <h1>Dante Visualizer</h1>
-    <div class="seg" role="group" aria-label="View">
+    <div class="seg view-seg" role="group" aria-label="Show">
+      <button id="view-diagram" aria-pressed="true" title="The signal-flow diagram (⌘1 / ⌘2 pick its layout)">Diagram</button>
+      <button id="view-monitor" aria-pressed="false" title="Network health: problems, devices, clock, switches and cables">Monitor<span id="m-tab-count" class="count" hidden></span></button>
+    </div>
+    <div class="seg diagram-only" role="group" aria-label="View">
       <button id="mode-network" aria-pressed="true" title="Each device once, inputs left and outputs right">Network</button>
       <button id="mode-flow" aria-pressed="false" title="Outputs on the left, inputs on the right, every wire flows left to right">Signal flow</button>
     </div>
-    <button id="btn-expand" title="Open or close every block's channel list (shortcut: E)">Expand all</button>
-    <button id="btn-layout" title="Rearrange the blocks automatically">Auto layout</button>
-    <button id="btn-fit" title="Zoom to fit">Fit</button>
-    <label class="file-btn" title="Open a Dante Controller preset (.xml) or a saved setup (.json)">Open…<input id="file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
-    <button id="btn-save" title="Save this layout, opened channels, view and network to a file">Save setup</button>
+    <button id="btn-expand" class="diagram-only" title="Open or close every block's channel list (shortcut: E)">Expand all</button>
+    <button id="btn-layout" class="diagram-only" title="Rearrange the blocks automatically">Auto layout</button>
+    <button id="btn-fit" class="diagram-only" title="Zoom to fit">Fit</button>
+    <label class="file-btn diagram-only" title="Open a Dante Controller preset (.xml) or a saved setup (.json)">Open…<input id="file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
+    <button id="btn-save" class="diagram-only" title="Save this layout, opened channels, view and network to a file">Save setup</button>
     <span id="status" class="status"></span>
+    <button id="btn-problems" class="problems-btn ok" hidden title="Open the monitor sidebar"><span class="pdot" aria-hidden="true"></span><span class="plabel">All good</span></button>
     <button id="btn-live" class="live-btn wait" aria-pressed="true" title="Connecting to the live network"><span class="live-dot" aria-hidden="true"></span><span class="live-label">Connecting…</span></button>
   </header>
   <main>
@@ -35,9 +40,84 @@
       <p class="muted">When the server is running on a Mac on the Dante network, the live network appears here automatically.</p>
     </div>
     <aside id="panel" class="panel" hidden></aside>
+    <aside id="m-side" class="m-side" hidden aria-label="Monitor sidebar">
+      <div class="m-side-head"><b>Monitor</b><button id="m-side-open" title="Open the full Monitor view">Open view</button><button id="m-side-close" class="close" aria-label="Close the sidebar">×</button></div>
+      <div id="m-side-body"></div>
+    </aside>
+    <section id="monitor" class="monitor" hidden aria-label="Monitor">
+      <div class="m-top">
+        <div class="seg" id="m-nav" role="group" aria-label="Monitor pages">
+          <button data-tab="overview">Problems</button>
+          <button data-tab="devices">Devices</button>
+          <button data-tab="clock">Clock</button>
+          <button data-tab="switches">Switches</button>
+          <button data-tab="cables">Cables</button>
+          <button data-tab="history">History</button>
+          <button data-tab="setup">Setup</button>
+        </div>
+        <span id="m-demo" class="m-demo" hidden>DEMO</span>
+        <span id="m-meta" class="muted m-meta">connecting…</span>
+      </div>
+      <div class="m-body">
+        <div class="m-tab" id="m-tab-overview">
+          <h3 class="m-h">Current problems</h3>
+          <div class="m-panel" id="m-issues"></div>
+          <h3 class="m-h">At a glance</h3>
+          <div class="m-tiles" id="m-tiles"></div>
+          <h3 class="m-h">Latest events</h3>
+          <div class="m-panel m-scroll"><table class="m-events"><tbody id="m-recent"></tbody></table></div>
+        </div>
+        <div class="m-tab" id="m-tab-devices" hidden>
+          <div class="m-panel m-scroll"><table>
+            <thead><tr><th>Device</th><th>Model</th><th>IP</th><th>MAC</th><th>Switch port</th><th class="num">Ping</th><th>Last 2 min</th><th class="num">Loss</th><th>Sample rate</th></tr></thead>
+            <tbody id="m-devices"></tbody></table></div>
+        </div>
+        <div class="m-tab" id="m-tab-clock" hidden>
+          <div class="m-tiles" id="m-clock-tiles"></div>
+          <h3 class="m-h">Devices sending clock</h3>
+          <div class="m-panel m-scroll"><table>
+            <thead><tr><th>Device</th><th>PTP</th><th>Clock ID</th><th class="num">Interval</th><th class="num">Jitter</th><th class="num">Missed</th><th class="num">Late</th><th class="num">Last heard</th></tr></thead>
+            <tbody id="m-clock-sources"></tbody></table></div>
+          <p class="m-hint">Jitter is how unevenly clock messages arrive at this Mac. Steady, low numbers are good. Spikes usually mean network congestion, or switch QoS that isn't prioritising the clock.</p>
+        </div>
+        <div class="m-tab" id="m-tab-switches" hidden><div id="m-switches"></div></div>
+        <div class="m-tab" id="m-tab-cables" hidden><div id="m-cables"></div></div>
+        <div class="m-tab" id="m-tab-history" hidden>
+          <div class="m-toolbar">
+            <select id="m-sev"><option value="">All events</option><option value="critical">Problems only</option><option value="warning">Warnings and problems</option></select>
+            <input id="m-search" placeholder="Search…">
+            <a class="m-btn" href="api/monitor/events.csv" download>Export CSV</a>
+            <button id="m-clear">Clear history</button>
+          </div>
+          <div class="m-panel m-scroll"><table class="m-events"><thead><tr><th>Time</th><th>Level</th><th>What</th><th>Details</th></tr></thead><tbody id="m-history"></tbody></table></div>
+        </div>
+        <div class="m-tab" id="m-tab-setup" hidden>
+          <h3 class="m-h">Monitoring</h3>
+          <div class="m-panel m-form">
+            <span class="muted">Listening on</span><span><span id="m-iface" class="mono"></span> <span class="muted">(follows the Network menu)</span></span>
+            <label for="m-notif" class="muted">Mac notifications</label><label><input type="checkbox" id="m-notif"> Notify me about problems and warnings</label>
+          </div>
+          <h3 class="m-h">Switches</h3>
+          <div class="m-panel m-scroll"><table><thead><tr><th>Name</th><th>Type</th><th>IP</th><th>Status</th><th></th></tr></thead><tbody id="m-swlist"></tbody></table></div>
+          <h3 class="m-h">Add a switch</h3>
+          <div class="m-panel">
+            <div class="m-form">
+              <label for="m-swtype" class="muted">Switch type</label><select id="m-swtype"></select>
+              <label for="m-swip" class="muted">IP address</label><input id="m-swip" placeholder="e.g. 192.168.1.10">
+              <label for="m-swname" class="muted">Name (optional)</label><input id="m-swname" placeholder="e.g. FOH rack">
+              <label for="m-swcomm" class="muted">SNMP community</label><input id="m-swcomm">
+              <span></span><span><button id="m-swtest">Test connection</button> <button id="m-swadd" class="primary">Add switch</button></span>
+            </div>
+            <p class="m-hint" id="m-swsetup"></p>
+            <div class="m-hint" id="m-swresult"></div>
+          </div>
+          <p class="m-hint">The monitor only listens and reads. It pings devices and reads switches over SNMP, and never changes anything on them.</p>
+        </div>
+      </div>
+    </section>
     <div id="tooltip" class="tooltip" hidden></div>
   </main>
-  <footer class="hint">Drag blocks to arrange · click a block to show its channels · E expands or collapses all · drag the background to pan · scroll to zoom</footer>
+  <footer class="hint diagram-only">Drag blocks to arrange · click a block to show its channels · E expands or collapses all · drag the background to pan · scroll to zoom</footer>
   <script type="module" src="app.js"></script>
 </body>
 </html>
