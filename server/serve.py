@@ -85,6 +85,7 @@ def model_from_snapshot(path):
             "tx": sorted(tx, key=lambda c: c["id"]),
             "rx": sorted(rx, key=lambda c: c["id"]),
         })
+    devices.sort(key=lambda d: d["name"].lower())  # stable order, so unchanged networks don't redraw
     iface = (snap.get("interface") or {}).get("name")
     return {"source": "live", "name": "Live network" + (f" ({iface})" if iface else ""),
             "capturedAt": snap.get("captured_at"), "devices": devices}
