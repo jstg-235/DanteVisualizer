@@ -10,12 +10,13 @@ cd "$(dirname "$0")"
 PY=${DV_PYTHON:-$PWD/.venv/bin/python}
 export DV_PYTHON=$PY
 # A port chosen by the user (DANTE_IF already set) stays fixed; otherwise it is detected each round.
-[ -n "$DANTE_IF" ] && export DANTE_IF_FIXED=1
+CHOSEN=$DANTE_IF
+[ -n "$CHOSEN" ] && export DANTE_IF_FIXED=1
 child=0
 trap 'stopping=1; [ $child -ne 0 ] && kill -TERM $child 2>/dev/null' INT TERM HUP
 stopping=0
 while [ $stopping -eq 0 ]; do
-  if ! DANTE_IF=$(./dante_iface.sh); then
+  if ! DANTE_IF=$(DANTE_IF=$CHOSEN ./dante_iface.sh); then
     # No Dante devices visible (cable out, network down): wait and look again.
     sleep 3 & child=$!; wait $child; child=0
     continue
