@@ -21,9 +21,11 @@ The app never changes routes or settings. The only requests it sends to devices 
 - **Instant updates.** The app uses a netaudio daemon that's already running on port 4780, or starts one (`netaudio daemon run`, log in `logs/daemon.log`) and stops it on quit. The diagram follows the daemon's live event stream, so a route made or removed in Dante Controller, or a device coming or going, shows within a moment. Levels come from the daemon too.
 - The daemon's metering port is set to 8772, because Dante Controller holds the standard 8752 and the daemon won't start without it.
 - If the daemon can't start, the app works as before: it re-reads the network every 10 seconds and runs its own metering helper. If the daemon stops while the app runs, the diagram falls back to the 10-second refresh until it's back. **Signal → Live Signal Levels** (⇧⌘M) turns metering on or off, and quitting sends "stop metering" to every device.
+- The **Live / Offline** button in the upper right shows whether the diagram is following the network. It is red when live and amber ("last seen 15:05") when the network has stopped answering. Click it, or press ⇧⌘L in the app, to freeze the view and go offline: nothing is polled and, in the app, devices are asked to stop sending levels. Opening a preset or a saved setup goes offline too. Click again to go back to the live network.
 
 - The first launch builds a Python environment with netaudio in `~/Library/Application Support/Dante Visualizer/venv`. That needs Python 3.10 or newer from python.org and an internet connection once.
 - Logs: **Dante Visualizer → Show Logs in Finder**.
+- **Network** menu: **Automatic** (the default) finds the port the Dante devices are on. On a Mac with several networks, pick the port yourself; the choice is remembered. Switching stops metering on the old network first. The window title shows the port in use.
 - Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
 - It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
 

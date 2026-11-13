@@ -29,6 +29,7 @@ final class Engine {
 
     private(set) var port: Int = 0
     private var server: Process?
+    private var stoppingAll = false
     private var meter: Process?
     private var daemon: Process?          // nil when there's no daemon or it was already running
     private(set) var usingDaemon = false
@@ -56,15 +57,50 @@ final class Engine {
 
     var url: URL { URL(string: "http://127.0.0.1:\(port)/")! }
 
+    /// The network port to use for Dante, or nil to find it automatically.
+    /// Passed to the engine scripts as DANTE_IF.
+    var interfaceOverride: String? {
+        get { UserDefaults.standard.string(forKey: "danteInterface") }
+        set { UserDefaults.standard.set(newValue, forKey: "danteInterface") }
+    }
+
+    /// The port the current snapshot came from (what Automatic picked), if known.
+    var interfaceInUse: String? {
+        let url = dataDir.appendingPathComponent("live_snapshot.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let iface = obj["interface"] as? [String: Any] else { return nil }
+        return iface["name"] as? String
+    }
+
+    /// Switch to another network port: stop everything (devices get "stop metering"),
+    /// forget the old network's snapshot and levels, and start again on the new port.
+    func switchInterface(to name: String?, metering: Bool) {
+        interfaceOverride = name
+        stop {
+            for f in ["live_snapshot.json", "levels.json"] {
+                try? FileManager.default.removeItem(at: self.dataDir.appendingPathComponent(f))
+            }
+            self.start(metering: metering)
+        }
+    }
+
     // MARK: start / stop
 
     func start(metering: Bool) {
+        stoppingAll = false
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 for d in [self.dataDir, self.logsDir] {
                     try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
                 }
                 try self.ensurePythonEnvironment()
+                // A snapshot left over from another port would show the wrong network as live.
+                if let want = self.interfaceOverride, let had = self.interfaceInUse, had != want {
+                    for f in ["live_snapshot.json", "levels.json"] {
+                        try? FileManager.default.removeItem(at: self.dataDir.appendingPathComponent(f))
+                    }
+                }
                 self.state = .starting
                 // A steady port keeps the page's saved layouts (stored per address) between launches.
                 self.port = Engine.freePort(preferred: Array(8770...8779))
@@ -82,6 +118,7 @@ final class Engine {
     /// Stops the helper first with SIGINT so it sends "stop metering" to every device,
     /// then the server. Calls `done` on the main queue when both have exited (max ~4 s).
     func stop(done: @escaping () -> Void) {
+        stoppingAll = true
         DispatchQueue.global().async {
             self.stopMeterSync()
             if let s = self.server, s.isRunning {
@@ -134,6 +171,7 @@ final class Engine {
         env["DV_DATA"] = dataDir.path
         env["DV_ENGINE"] = engineDir.path
         env["PYTHONUNBUFFERED"] = "1"
+        if let iface = interfaceOverride { env["DANTE_IF"] = iface } else { env.removeValue(forKey: "DANTE_IF") }
         // Apps launched from Finder get a minimal PATH.
         env["PATH"] = [venvDir.appendingPathComponent("bin").path, "/usr/local/bin", "/opt/homebrew/bin",
                        "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
@@ -174,7 +212,7 @@ final class Engine {
         }
         server = try launch(venvPython, args, log: "server.log")
         server?.terminationHandler = { [weak self] p in
-            guard let self, self.state == .running || self.state == .starting else { return }
+            guard let self, !self.stoppingAll, self.state == .running || self.state == .starting else { return }
             self.state = .failed("The diagram server stopped (exit \(p.terminationStatus)). See logs/server.log.")
         }
     }

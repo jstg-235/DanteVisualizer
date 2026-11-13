@@ -9,6 +9,8 @@
 cd "$(dirname "$0")"
 PY=${DV_PYTHON:-$PWD/.venv/bin/python}
 export DV_PYTHON=$PY
+# A port chosen by the user (DANTE_IF already set) stays fixed; otherwise it is detected each round.
+[ -n "$DANTE_IF" ] && export DANTE_IF_FIXED=1
 child=0
 trap 'stopping=1; [ $child -ne 0 ] && kill -TERM $child 2>/dev/null' INT TERM HUP
 stopping=0
@@ -26,6 +28,7 @@ while [ $stopping -eq 0 ]; do
   while kill -0 $child 2>/dev/null; do wait $child; rc=$?; done
   child=0
   [ $rc -eq 3 ] || break
-  echo "$(date '+%F %T') interface changed; restarting helper"
+  echo "$(date '+%F %T') interface changed or gone; restarting helper in 3 s"
+  sleep 3 & child=$!; wait $child; child=0
 done
 exit $rc
