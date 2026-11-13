@@ -13,7 +13,12 @@ child=0
 trap 'stopping=1; [ $child -ne 0 ] && kill -TERM $child 2>/dev/null' INT TERM HUP
 stopping=0
 while [ $stopping -eq 0 ]; do
-  export DANTE_IF=$(./dante_iface.sh) PYTHONPATH="$PWD/shim"
+  if ! DANTE_IF=$(./dante_iface.sh); then
+    # No Dante devices visible (cable out, network down): wait and look again.
+    sleep 3 & child=$!; wait $child; child=0
+    continue
+  fi
+  export DANTE_IF PYTHONPATH="$PWD/shim"
   "$PY" meter_daemon.py "$@" &
   child=$!
   wait $child; rc=$?

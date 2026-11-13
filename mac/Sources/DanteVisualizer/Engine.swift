@@ -52,7 +52,8 @@ final class Engine {
                 }
                 try self.ensurePythonEnvironment()
                 self.state = .starting
-                self.port = Engine.freePort(preferred: 8770)
+                // A steady port keeps the page's saved layouts (stored per address) between launches.
+                self.port = Engine.freePort(preferred: Array(8770...8779))
                 try self.startServer()
                 if metering { try self.startMeter() }
                 self.waitForServer()
@@ -230,12 +231,16 @@ final class Engine {
         while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
     }
 
-    /// The preferred port if it's free on 127.0.0.1, otherwise one the system picks.
-    static func freePort(preferred: Int) -> Int {
+    /// The first free port of `preferred` on 127.0.0.1, otherwise one the system picks.
+    static func freePort(preferred: [Int]) -> Int {
         func bind(_ port: Int) -> Int? {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
             guard fd >= 0 else { return nil }
             defer { close(fd) }
+            // Match the server (Python sets SO_REUSEADDR), so a port in TIME_WAIT from a
+            // previous launch still counts as free.
+            var one: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
             var addr = sockaddr_in()
             addr.sin_family = sa_family_t(AF_INET)
             addr.sin_port = in_port_t(UInt16(port).bigEndian)
@@ -253,7 +258,8 @@ final class Engine {
             }
             return Int(UInt16(bigEndian: out.sin_port))
         }
-        return bind(preferred) ?? bind(0) ?? preferred
+        for p in preferred { if let got = bind(p) { return got } }
+        return bind(0) ?? preferred[0]
     }
 }
 

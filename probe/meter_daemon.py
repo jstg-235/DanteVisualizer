@@ -265,6 +265,16 @@ async def stats_logger():
         log.info("packets/s: %s", ", ".join(f"{n} {r:.1f}" for n, r in sorted(rates.items())))
 
 
+def interface_gone():
+    """True when this helper should restart on another interface: ours has disappeared,
+    or the snapshot now comes from a different one."""
+    present = os.popen("ifconfig -l").read().split()
+    if IFACE not in present:
+        return True
+    snap_iface, _ = snapshot_state()
+    return bool(snap_iface and snap_iface != IFACE)
+
+
 async def main():
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -274,6 +284,10 @@ async def main():
     code = 0
     try:
         while not stopping.is_set():
+            if interface_gone():
+                log.info("interface %s is gone or no longer the Dante one; restarting to re-detect", IFACE)
+                code = 3
+                break
             try:
                 why = await session()
                 if why == "iface":

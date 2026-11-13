@@ -10,7 +10,8 @@ cd "$(dirname "$0")"
 PY=${DV_PYTHON:-$PWD/.venv/bin/python}
 DATA=${DV_DATA:-$PWD}
 export DV_PYTHON=$PY
-export DANTE_IF=$(./dante_iface.sh) PYTHONPATH="$PWD/shim"
+DANTE_IF=$(./dante_iface.sh) || exit 1   # no Dante devices visible: keep the last snapshot
+export DANTE_IF PYTHONPATH="$PWD/shim"
 export DANTE_IP=$(ifconfig $DANTE_IF 2>/dev/null | awk '/inet /{print $2; exit}')
 tmp=$(mktemp -d)
 "$(dirname "$PY")/netaudio" --no-color --interface $DANTE_IF --timeout 3 -o json device list > $tmp/raw_device_list.json 2>/dev/null &&
