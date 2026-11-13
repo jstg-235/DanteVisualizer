@@ -8,10 +8,26 @@ A whole-network, signal-flow view of a Dante audio network, as an alternative to
 |---|---|---|
 | 1 | Prove we can read the network (discovery, channels, routes, signal presence) | Done (probe on the Mac) |
 | 2 | Draw the network as a signal flow diagram | Done (this app) |
-| 3 | Make it live: online/offline, route changes, signal indicators | In progress |
-| 4 | Use it on a real system, then decide on a standalone Mac app | Planned |
+| 3 | Make it live: online/offline, route changes, signal indicators | Done |
+| 4 | Standalone Mac app | In progress (`mac/`) |
 
 The app only reads the network. It never changes routes or settings.
+
+## Mac app
+
+`mac/build_app.sh --install` builds **Dante Visualizer.app** with the Command Line Tools (no Xcode) and copies it to `~/Applications`. The app opens the diagram in its own window and runs everything else itself: the snapshot refresh, the diagram server on 127.0.0.1, and the metering helper. **Signal → Live Signal Levels** (⇧⌘M) turns metering on or off, and quitting sends "stop metering" to every device.
+
+- The first launch builds a Python environment with netaudio in `~/Library/Application Support/Dante Visualizer/venv`. That needs Python 3.10 or newer from python.org and an internet connection once.
+- Logs: **Dante Visualizer → Show Logs in Finder**.
+- Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
+- It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
+
+## Engine (`probe/`)
+
+- `refresh_snapshot.sh` reads devices, channels and routes once (read-only) and writes `live_snapshot.json`.
+- `run_meter_daemon.sh` / `meter_daemon.py` keep metering going and write `levels.json` about 5 times a second.
+- `dante_iface.sh` finds the network port the Dante devices are on. `shim/` ties Python's sockets to that port, because macOS can have link-local routes on several ports.
+- With `DV_PYTHON` and `DV_DATA` unset, they use `probe/.venv` and write next to themselves. The Mac app sets both.
 
 ## Run it
 
