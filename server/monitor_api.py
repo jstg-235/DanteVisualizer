@@ -15,6 +15,7 @@ import csv
 import io
 import json
 import os
+import shutil
 import threading
 import time
 import urllib.request
@@ -39,6 +40,35 @@ def _iso_to_ts(s):
         return time.time()
 
 
+# Where the standalone Dante Monitor app kept its settings and history.
+OLD_APP_DIR = os.path.expanduser("~/Library/Application Support/Dante Monitor")
+
+
+def import_old_app(data_dir, old_dir=OLD_APP_DIR):
+    """First run only: carry over the standalone app's switch list and history.
+    Its interface choice and notification setting are not carried over: the monitor now
+    follows the app's Network menu, and notifications start off."""
+    if os.path.exists(os.path.join(data_dir, "config.json")) or not os.path.isdir(old_dir):
+        return False
+    os.makedirs(data_dir, exist_ok=True)
+    try:
+        with open(os.path.join(old_dir, "config.json")) as f:
+            old = json.load(f)
+        cfg = {"interface_ip": "", "notifications": False,
+               "switches": old.get("switches") or [], "switch_poll_seconds": old.get("switch_poll_seconds", 10)}
+        with open(os.path.join(data_dir, "config.json"), "w") as f:
+            json.dump(cfg, f, indent=2)
+    except (OSError, ValueError):
+        pass
+    hist = os.path.join(old_dir, "history.sqlite")
+    if os.path.exists(hist) and not os.path.exists(os.path.join(data_dir, "history.sqlite")):
+        try:
+            shutil.copy2(hist, os.path.join(data_dir, "history.sqlite"))
+        except OSError:
+            pass
+    return True
+
+
 def _short(name):
     return (name or "").removesuffix(".").removesuffix(".local")
 
@@ -56,6 +86,8 @@ class MonitorService:
                 os.remove(os.path.join(data_dir, "history.sqlite"))
             except OSError:
                 pass
+        else:
+            import_old_app(data_dir)
         self.engine = Engine(data_dir, demo=self.world)
         if self.world and not self.engine.config.data["switches"]:
             self.engine.config.data["switches"] = self.world.default_switches()

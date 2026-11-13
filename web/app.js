@@ -1,4 +1,5 @@
 import { parsePresetXml, buildRoutes, rangeText } from "./model.js";
+import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered } from "./monitor.js";
 
 // ---------- geometry ----------
 const W = 250;          // block width
@@ -21,6 +22,8 @@ const state = {
   hoverRoute: null,
   colors: new Map(),
   levels: null,                           // { device: { tx: [dB|null], rx: [dB|null], age } }
+  badges: {},                             // from the monitor: { device: [{ kind: "clock"|"ip", severity, text }] }
+  view$: "diagram",                       // "diagram" | "monitor"
 };
 
 // Elements that show signal, collected on each render and updated in place
@@ -249,16 +252,17 @@ function render() {
       const a = portPos(g.srcNode, "tx"), b = portPos(g.dstNode, "rx");
       const width = 2 + Math.log2(g.routes.length) * 1.6;
       const laneY = isBackward(a, b) ? floorBetween(ns, a.x, b.x) + 40 + 26 * lane++ : null;
-      const path = el("path", { d: curve(a, b, laneY), class: "wire bundle" + (dim ? " dim" : ""), stroke: color, "stroke-width": width }, wiresLayer);
+      const failed = g.routes.filter((r) => r.failed).length;
+      const path = el("path", { d: curve(a, b, laneY), class: "wire bundle" + (dim ? " dim" : "") + (failed ? " failed" : ""), stroke: color, "stroke-width": width }, wiresLayer);
       hoverBundle(path, g);
       const mid = placeLabel(path, placed);
-      const label = el("g", { class: "bundle-label" + (dim ? " dim" : ""), transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
-      const text = `${g.routes.length} ch`;
+      const label = el("g", { class: "bundle-label" + (dim ? " dim" : "") + (failed ? " failed" : ""), transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
+      const text = `${g.routes.length} ch` + (failed ? ` · ${failed} failed` : "");
       el("rect", { x: -(text.length * 3.6 + 8), y: -10, width: text.length * 7.2 + 16, height: 20, rx: 10, stroke: color }, label);
       const t = el("text", { x: 0, y: 4, "text-anchor": "middle" }, label);
       t.textContent = text;
       hoverBundle(label, g);
-      live.bundles.push({ path, label, text: t, rect: label.firstChild, routes: g.routes, total: g.routes.length });
+      live.bundles.push({ path, label, text: t, rect: label.firstChild, routes: g.routes, total: g.routes.length, failed });
     } else {
       const laneBase = floorBetween(ns, portPos(g.srcNode, "tx").x, portPos(g.dstNode, "rx").x) + 40 + 26 * lane;
       let usedLane = false;
@@ -267,7 +271,7 @@ function render() {
         const back = isBackward(a, b);
         usedLane ||= back;
         const hot = state.hoverRoute === r.id;
-        const path = el("path", { d: curve(a, b, back ? laneBase : null), class: "wire single" + (dim && !related(r) ? " dim" : "") + (hot ? " hot" : ""), stroke: color }, wiresLayer);
+        const path = el("path", { d: curve(a, b, back ? laneBase : null), class: "wire single" + (dim && !related(r) ? " dim" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : ""), stroke: color }, wiresLayer);
         hoverRoute(path, r);
         live.wires.push({ path, route: r });
       }
@@ -294,10 +298,24 @@ function drawNode(n, groups) {
   const header = el("g", { class: "header" }, g);
   el("rect", { class: "header-hit", width: W, height: HEADER, rx: 10 }, header);
   const title = el("text", { x: 16, y: 20, class: "title" }, header);
-  title.textContent = shorten(d.name, 25);
+  title.textContent = shorten(d.name, (state.badges[d.name] || []).length ? 17 : 25);
   const sub = el("text", { x: 16, y: 37, class: "subtitle" }, header);
   const sideLabel = state.mode === "flow" ? (n.tx ? "Outputs · " : "Inputs · ") : "";
   sub.textContent = shorten(sideLabel + [d.manufacturer, d.model].filter(Boolean).join(" ") + (d.online ? "" : " · offline"), 36);
+  // Clock and IP problems from the monitor: small badges at the top right of the block.
+  let bx = W - 26;
+  for (const b of [...(state.badges[d.name] || [])].reverse()) {
+    const label = b.kind === "clock" ? "CLOCK" : "IP";
+    const bw = label.length * 6.4 + 10;
+    bx -= bw;
+    const bg = el("g", { class: `nbadge ${b.severity}`, transform: `translate(${bx},8)` }, header);
+    el("rect", { width: bw, height: 15, rx: 7.5 }, bg);
+    const bt = el("text", { x: bw / 2, y: 11, "text-anchor": "middle" }, bg);
+    bt.textContent = label;
+    const tt = el("title", {}, bg);
+    tt.textContent = `${b.kind === "clock" ? "Clock problem" : "IP problem"}: ${b.text}`;
+    bx -= 4;
+  }
   const chev = el("text", { x: W - 14, y: 28, class: "chevron", "text-anchor": "end" }, header);
   chev.textContent = expanded ? "▾" : "▸";
   const tip = el("title", {}, header);
@@ -321,9 +339,10 @@ function drawNode(n, groups) {
     const rows = (list, side) => list.forEach((c, i) => {
       const y = HEADER + i * ROW + ROW / 2 + 4;
       const routed = side === "rx" ? !!c.subDevice : state.routes.some((r) => r.srcDevice === d.name && r.srcChannel === c.id);
+      const failed = side === "rx" && c.state === "error";
       const label = el("text", {
         x: side === "rx" ? 22 : W - 22, y: y + 4, "text-anchor": side === "rx" ? "start" : "end",
-        class: "chan" + (routed ? "" : " unused"),
+        class: "chan" + (routed ? "" : " unused") + (failed ? " failed" : ""),
       }, g);
       label.textContent = `${c.id} ${shorten(c.name === String(c.id).padStart(2, "0") || c.name === String(c.id) ? "" : c.name, 16)}`.trim();
       el("circle", { cx: side === "rx" ? 0 : W, cy: y, r: routed ? 3 : 2, class: "port" + (routed ? "" : " unused") }, g);
@@ -363,18 +382,18 @@ function applyLevels() {
   for (const x of live.wires) {
     const r = x.route;
     const c = sigClass(levelOf(r.srcDevice, "tx", r.srcChannel));
-    x.path.classList.toggle("live", c !== "off" && c !== "unknown");
+    x.path.classList.toggle("live", !r.failed && c !== "off" && c !== "unknown");
   }
   for (const b of live.bundles) {
     let on = 0, known = 0;
     for (const r of b.routes) {
       const c = sigClass(levelOf(r.srcDevice, "tx", r.srcChannel));
       if (c !== "unknown") known++;
-      if (c !== "off" && c !== "unknown") on++;
+      if (!r.failed && c !== "off" && c !== "unknown") on++;
     }
     b.path.classList.toggle("live", on > 0);
     b.label.classList.toggle("live", on > 0);
-    const text = known ? `${on}/${b.total} live` : `${b.total} ch`;
+    const text = (known ? `${on}/${b.total} live` : `${b.total} ch`) + (b.failed ? ` · ${b.failed} failed` : "");
     if (b.text.textContent !== text) {
       b.text.textContent = text;
       b.rect.setAttribute("x", -(text.length * 3.6 + 8));
@@ -414,6 +433,8 @@ function renderPanel(byId) {
     <button class="close" aria-label="Close">×</button>
     <h2>${esc(d.name)}</h2>
     <p class="muted">${esc([d.manufacturer, d.model].filter(Boolean).join(" "))}${d.sampleRate ? ` · ${d.sampleRate / 1000} kHz` : ""} · ${d.rx.length} in / ${d.tx.length} out</p>
+    ${(state.badges[d.name] || []).map((b) => `<p class="sev-text-${b.severity}"><b>${b.kind === "clock" ? "Clock problem" : "IP problem"}:</b> ${esc(b.text)}</p>`).join("")}
+    ${state.routes.some((r) => r.dstDevice === d.name && r.failed) ? `<p class="sev-text-critical"><b>Failed routes:</b> in ${rangeText(state.routes.filter((r) => r.dstDevice === d.name && r.failed).map((r) => r.dstChannel))}</p>` : ""}
     ${canIdentify(d) ? `<p><button class="identify" title="Blink this device's identify LED so you can find it in the rack">Identify</button> <span class="muted identify-msg"></span></p>` : ""}
     <h3>Receiving from</h3>
     <ul>${[...into].map(([o, rs]) => row(o, rs, "in")).join("") || '<li class="muted">Nothing</li>'}</ul>
@@ -466,18 +487,25 @@ function hideTip() { tooltip.hidden = true; }
 
 function routeText(r) {
   const lv = state.levels ? `<br><span class="muted">Signal: ${dbText(levelOf(r.srcDevice, "tx", r.srcChannel))} sent, ${dbText(levelOf(r.dstDevice, "rx", r.dstChannel))} received</span>` : "";
-  return `<b>${esc(r.srcDevice)}</b> out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span><br>→ <b>${esc(r.dstDevice)}</b> in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>${lv}`;
+  const bad = r.failed ? `<br><b class="sev-text-critical">Route failed${r.stateLabel ? ": " + esc(r.stateLabel) : ""}</b>` : "";
+  return `<b>${esc(r.srcDevice)}</b> out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span><br>→ <b>${esc(r.dstDevice)}</b> in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>${bad}${lv}`;
 }
 function hoverRoute(path, r) {
   path.addEventListener("mouseenter", (e) => { path.classList.add("hot"); showTip(e, routeText(r)); });
   path.addEventListener("mousemove", (e) => showTip(e, routeText(r)));
   path.addEventListener("mouseleave", () => { path.classList.remove("hot"); hideTip(); });
 }
+function failedText(rs) {
+  const f = rs.filter((r) => r.failed);
+  if (!f.length) return "";
+  const why = [...new Set(f.map((r) => r.stateLabel).filter(Boolean))].join(", ");
+  return `<b class="sev-text-critical">${f.length} failed${why ? ": " + esc(why) : ""}</b> <span class="muted">(in ${rangeText(f.map((r) => r.dstChannel))})</span><br>`;
+}
 function hoverBundle(elm, g) {
   const rs = g.routes;
   const html = () => `<b>${esc(rs[0].srcDevice)}</b> → <b>${esc(rs[0].dstDevice)}</b> · ${rs.length} channels<br>
     <span class="muted">out ${rangeText(rs.map((r) => r.srcChannel).filter((x) => x != null))} → in ${rangeText(rs.map((r) => r.dstChannel))}</span><br>
-    <span class="muted">Click either device to see each channel</span>`;
+    ${failedText(rs)}<span class="muted">Click either device to see each channel</span>`;
   elm.addEventListener("mouseenter", (e) => showTip(e, html()));
   elm.addEventListener("mousemove", (e) => showTip(e, html()));
   elm.addEventListener("mouseleave", hideTip);
@@ -485,7 +513,8 @@ function hoverBundle(elm, g) {
 function showChannel(e, d, side, c) {
   if (side === "rx") {
     showTip(e, `<b>${esc(d.name)}</b> in ${c.id} <span class="muted">${esc(c.name)}</span>` + (state.levels ? ` · ${dbText(levelOf(d.name, "rx", c.id))}` : "") + `<br>` +
-      (c.subDevice ? `← ${esc(c.subDevice)} · ${esc(c.subChannel)}` : `<span class="muted">Not routed</span>`));
+      (c.subDevice ? `← ${esc(c.subDevice)} · ${esc(c.subChannel)}` : `<span class="muted">Not routed</span>`) +
+      (c.state === "error" ? `<br><b class="sev-text-critical">Route failed${c.stateLabel ? ": " + esc(c.stateLabel) : ""}</b>` : ""));
   } else {
     const dests = state.routes.filter((r) => r.srcDevice === d.name && r.srcChannel === c.id);
     showTip(e, `<b>${esc(d.name)}</b> out ${c.id} <span class="muted">${esc(c.name)}</span>` + (state.levels ? ` · ${dbText(levelOf(d.name, "tx", c.id))}` : "") + `<br>` +
@@ -615,6 +644,7 @@ function updateExpandButton() {
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (state.view$ !== "diagram") return;
   if (e.key === "e" || e.key === "E") $("btn-expand").click();
 });
 $("btn-expand").onclick = () => {
@@ -902,7 +932,72 @@ async function pollLevels() {
   levelsTimer = setTimeout(pollLevels, delay);
 }
 
+// ---------- monitor: Diagram / Monitor views, sidebar and problem count ----------
+function setView(v) {
+  state.view$ = v;
+  save("dv.view", v);
+  document.body.classList.toggle("view-monitor", v === "monitor");
+  $("monitor").hidden = v !== "monitor";
+  $("view-diagram").setAttribute("aria-pressed", String(v === "diagram"));
+  $("view-monitor").setAttribute("aria-pressed", String(v === "monitor"));
+  hideTip();
+  if (v === "monitor") monitorRendered();
+  else render();
+}
+$("view-diagram").onclick = () => setView("diagram");
+$("view-monitor").onclick = () => setView("monitor");
+
+// Show a device on the diagram: switch to it, select the block and bring it to the middle.
+function selectDevice(name) {
+  setView("diagram");
+  if (!state.model) return;
+  const ns = nodes();
+  const n = ns.find((x) => x.id === nodeIdFor(name, "rx")) || ns.find((x) => x.id === nodeIdFor(name, "tx")) ||
+    ns.find((x) => x.device.name === name);
+  if (!n) { showStatus(`${name} isn't on the diagram right now`); return; }
+  state.selected = n.id;
+  render();
+  const p = state.positions[state.mode][n.id];
+  const k = state.view.k;
+  state.view.x = svg.clientWidth / 2 - (p.x + W / 2) * k;
+  state.view.y = svg.clientHeight / 2 - (p.y + nodeHeight(n) / 2) * k;
+  userMoved = true;
+  viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
+}
+
+function updateProblems(mon) {
+  const b = $("btn-problems");
+  const n = mon.issues.length;
+  const worst = mon.issues[0]?.severity;
+  const crit = mon.issues.filter((i) => i.severity === "critical").length;
+  b.hidden = false;
+  b.className = "problems-btn " + (n ? (worst === "critical" ? "critical" : "warning") : "ok");
+  b.querySelector(".plabel").textContent = !n ? "All good" : crit ? `${n} problem${n === 1 ? "" : "s"}` : `${n} warning${n === 1 ? "" : "s"}`;
+  b.title = n ? mon.issues.slice(0, 6).map((i) => `${i.subject}: ${i.message}`).join("\n") + "\n\nClick for details" : "No problems. Click to open the monitor sidebar.";
+}
+$("btn-problems").onclick = () => {
+  if (state.view$ === "monitor") showMonitorTab("overview");
+  else toggleSidebar();
+};
+
+initMonitor({
+  onState(mon) {
+    updateProblems(mon);
+    const badges = mon.badges || {};
+    if (JSON.stringify(badges) !== JSON.stringify(state.badges)) {
+      state.badges = badges;
+      if (state.view$ === "diagram" && !dragging) render();
+    }
+  },
+  onSelectDevice: selectDevice,
+  hasDevice: (name) => !!state.model?.devices.some((d) => d.name === name),
+  onOpenView: () => setView("monitor"),
+  onSidebar: (open) => $("btn-problems").setAttribute("aria-pressed", String(open)),
+  onAvailable(yes) { if (!yes && state.view$ === "monitor") setView("diagram"); },
+});
+
 setMode(state.mode);
+if (load("dv.view", "diagram") === "monitor") setView("monitor");
 updateLiveButton();
 tellApp(true);   // the app may still have metering off from before a reload
 poll();
