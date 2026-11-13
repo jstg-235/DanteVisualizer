@@ -44,6 +44,8 @@ body {
   padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .bar h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+.bar h1 { display: inline-flex; align-items: center; gap: 8px; }
+.bar h1 .logo { border-radius: 5px; flex: none; }
 button, .file-btn {
   font: inherit; color: var(--text); background: var(--surface);
   border: 1px solid var(--border); border-radius: 8px; padding: 5px 11px; cursor: pointer;

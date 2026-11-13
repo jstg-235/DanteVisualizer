@@ -25,6 +25,18 @@ cp "$BIN" "$APP/Contents/MacOS/DanteVisualizer"
 rsync -a --exclude '.venv' --exclude '__pycache__' --exclude '*.json' --exclude '*.log' --exclude '*.pcap' \
   "$ROOT/web" "$ROOT/server" "$ROOT/probe" "$ROOT/requirements.txt" "$APP/Contents/Resources/engine/"
 
+# App icon: mac/AppIcon.png (1024 px) → AppIcon.icns with the built-in sips and iconutil.
+if [[ -f AppIcon.png ]]; then
+  ICONSET=$(mktemp -d)/AppIcon.iconset
+  mkdir -p "$ICONSET"
+  for s in 16 32 128 256 512; do
+    sips -z $s $s AppIcon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s*2)) $((s*2)) AppIcon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+  rm -rf "$(dirname "$ICONSET")"
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +47,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>local.dantevisualizer.app</string>
   <key>CFBundleExecutable</key><string>DanteVisualizer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleShortVersionString</key><string>0.4</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
