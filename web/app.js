@@ -4,7 +4,7 @@ import { parsePresetXml, buildRoutes, rangeText } from "./model.js";
 const W = 250;          // block width
 const HEADER = 48;      // block header height
 const ROW = 16;         // channel row height when expanded
-const SUMMARY = 34;     // collapsed body height
+const SUMMARY = 52;     // collapsed body height
 const SVGNS = "http://www.w3.org/2000/svg";
 
 const PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#14b8a6"];
@@ -20,7 +20,12 @@ const state = {
   selected: null,                         // node id
   hoverRoute: null,
   colors: new Map(),
+  levels: null,                           // { device: { tx: [dB|null], rx: [dB|null], age } }
 };
+
+// Elements that show signal, collected on each render and updated in place
+// whenever new levels arrive (several times a second), without a full redraw.
+const live = { dots: [], wires: [], bundles: [], counts: [] };
 
 const svg = document.getElementById("canvas");
 const viewport = document.getElementById("viewport");
@@ -125,6 +130,24 @@ function deviceOrder() {
   return (n) => names.indexOf(n.device.name);
 }
 
+// Open or close a block's channel list. Blocks below it in the same column move
+// down (or back up) by the change in height so nothing ends up hidden underneath.
+function toggleExpanded(id, open = !state.expanded.has(id)) {
+  if (open === state.expanded.has(id)) return;
+  const n = nodes().find((x) => x.id === id);
+  const pos = state.positions[state.mode];
+  if (!n || !pos?.[id]) { open ? state.expanded.add(id) : state.expanded.delete(id); return; }
+  const before = nodeHeight(n);
+  open ? state.expanded.add(id) : state.expanded.delete(id);
+  const delta = nodeHeight(n) - before;
+  const p = pos[id];
+  for (const [otherId, q] of Object.entries(pos)) {
+    if (otherId === id) continue;
+    const overlapsX = q.x < p.x + W && q.x + W > p.x;
+    if (overlapsX && q.y >= p.y + Math.min(before, before + delta) - 1) q.y += delta;
+  }
+}
+
 function persistLayout() {
   save(layoutKey(), { positions: state.positions, expanded: [...state.expanded] });
 }
@@ -190,6 +213,7 @@ function render() {
 
   wiresLayer.replaceChildren();
   labelsLayer.replaceChildren();
+  live.dots = []; live.wires = []; live.bundles = []; live.counts = [];
   const placed = [];
   let lane = 0;
   nodesLayer.replaceChildren();
@@ -234,6 +258,7 @@ function render() {
       const t = el("text", { x: 0, y: 4, "text-anchor": "middle" }, label);
       t.textContent = text;
       hoverBundle(label, g);
+      live.bundles.push({ path, label, text: t, rect: label.firstChild, routes: g.routes, total: g.routes.length });
     } else {
       const laneBase = floorBetween(ns, portPos(g.srcNode, "tx").x, portPos(g.dstNode, "rx").x) + 40 + 26 * lane;
       let usedLane = false;
@@ -244,12 +269,14 @@ function render() {
         const hot = state.hoverRoute === r.id;
         const path = el("path", { d: curve(a, b, back ? laneBase : null), class: "wire single" + (dim && !related(r) ? " dim" : "") + (hot ? " hot" : ""), stroke: color }, wiresLayer);
         hoverRoute(path, r);
+        live.wires.push({ path, route: r });
       }
       if (usedLane) lane++;
     }
   }
 
   for (const n of ns) drawNode(n, groups);
+  applyLevels();
   viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
   renderPanel(byId);
 }
@@ -284,6 +311,8 @@ function drawNode(n, groups) {
     }
     const s = el("text", { x: 16, y: HEADER + 21, class: "summary" }, g);
     s.textContent = parts.join("  ·  ");
+    const lc = el("text", { x: 16, y: HEADER + 40, class: "live-count" }, g);
+    live.counts.push({ el: lc, device: d.name, rx: n.rx, tx: n.tx });
     if (n.rx) el("circle", { cx: 0, cy: HEADER + SUMMARY / 2, r: 5, class: "port" }, g);
     if (n.tx) el("circle", { cx: W, cy: HEADER + SUMMARY / 2, r: 5, class: "port" }, g);
   } else {
@@ -292,11 +321,13 @@ function drawNode(n, groups) {
       const y = HEADER + i * ROW + ROW / 2 + 4;
       const routed = side === "rx" ? !!c.subDevice : state.routes.some((r) => r.srcDevice === d.name && r.srcChannel === c.id);
       const label = el("text", {
-        x: side === "rx" ? 12 : W - 12, y: y + 4, "text-anchor": side === "rx" ? "start" : "end",
+        x: side === "rx" ? 22 : W - 22, y: y + 4, "text-anchor": side === "rx" ? "start" : "end",
         class: "chan" + (routed ? "" : " unused"),
       }, g);
       label.textContent = `${c.id} ${shorten(c.name === String(c.id).padStart(2, "0") || c.name === String(c.id) ? "" : c.name, 16)}`.trim();
       el("circle", { cx: side === "rx" ? 0 : W, cy: y, r: routed ? 3 : 2, class: "port" + (routed ? "" : " unused") }, g);
+      const dot = el("circle", { cx: side === "rx" ? 13 : W - 13, cy: y, r: 3.6, class: "sig" }, g);
+      live.dots.push({ el: dot, device: d.name, side, ch: c.id });
       label.addEventListener("mouseenter", (e) => showChannel(e, d, side, c));
       label.addEventListener("mouseleave", hideTip);
     });
@@ -304,6 +335,61 @@ function drawNode(n, groups) {
     if (n.tx) rows(d.tx, "tx");
   }
   makeDraggable(header, n);
+}
+
+// ---------- signal levels ----------
+// Levels arrive in dBFS per channel (null = muted or no reading).
+const SIGNAL_DB = -60;     // at or above this counts as signal present
+function levelOf(device, side, ch) {
+  const d = state.levels?.[device];
+  if (!d || d.stale) return undefined;           // unknown
+  const v = d[side]?.[ch - 1];
+  return v === undefined ? undefined : v;
+}
+function sigClass(db) {
+  if (db === undefined) return "unknown";
+  if (db === null || db < SIGNAL_DB) return "off";
+  if (db >= -0.5) return "clip";
+  if (db >= -6) return "hot";
+  return "on";
+}
+const dbText = (db) => (db === undefined ? "no reading" : db === null || db < SIGNAL_DB ? "no signal" : `${db.toFixed(1)} dBFS`);
+
+function applyLevels() {
+  const have = !!state.levels;
+  document.body.classList.toggle("has-levels", have);
+  for (const x of live.dots) x.el.setAttribute("class", "sig " + sigClass(levelOf(x.device, x.side, x.ch)));
+  for (const x of live.wires) {
+    const r = x.route;
+    const c = sigClass(levelOf(r.srcDevice, "tx", r.srcChannel));
+    x.path.classList.toggle("live", c !== "off" && c !== "unknown");
+  }
+  for (const b of live.bundles) {
+    let on = 0, known = 0;
+    for (const r of b.routes) {
+      const c = sigClass(levelOf(r.srcDevice, "tx", r.srcChannel));
+      if (c !== "unknown") known++;
+      if (c !== "off" && c !== "unknown") on++;
+    }
+    b.path.classList.toggle("live", on > 0);
+    b.label.classList.toggle("live", on > 0);
+    const text = known ? `${on}/${b.total} live` : `${b.total} ch`;
+    if (b.text.textContent !== text) {
+      b.text.textContent = text;
+      b.rect.setAttribute("x", -(text.length * 3.6 + 8));
+      b.rect.setAttribute("width", text.length * 7.2 + 16);
+    }
+  }
+  for (const x of live.counts) {
+    const d = state.levels?.[x.device];
+    if (!d || d.stale) { x.el.textContent = have ? "No signal reading" : ""; x.el.setAttribute("class", "live-count"); continue; }
+    const count = (arr) => (arr || []).filter((v) => v != null && v >= SIGNAL_DB).length;
+    const parts = [];
+    if (x.rx) parts.push(`${count(d.rx)} in`);
+    if (x.tx) parts.push(`${count(d.tx)} out`);
+    x.el.textContent = `● Signal on ${parts.join(" · ")}`;
+    x.el.setAttribute("class", "live-count" + (count(d.rx) + count(d.tx) ? " on" : ""));
+  }
 }
 
 function shorten(s, max) { return s.length > max ? s.slice(0, max - 1) + "…" : s; }
@@ -355,7 +441,8 @@ function showTip(e, html) {
 function hideTip() { tooltip.hidden = true; }
 
 function routeText(r) {
-  return `<b>${esc(r.srcDevice)}</b> out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span><br>→ <b>${esc(r.dstDevice)}</b> in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>`;
+  const lv = state.levels ? `<br><span class="muted">Signal: ${dbText(levelOf(r.srcDevice, "tx", r.srcChannel))} sent, ${dbText(levelOf(r.dstDevice, "rx", r.dstChannel))} received</span>` : "";
+  return `<b>${esc(r.srcDevice)}</b> out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span><br>→ <b>${esc(r.dstDevice)}</b> in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>${lv}`;
 }
 function hoverRoute(path, r) {
   path.addEventListener("mouseenter", (e) => { path.classList.add("hot"); showTip(e, routeText(r)); });
@@ -373,11 +460,11 @@ function hoverBundle(elm, g) {
 }
 function showChannel(e, d, side, c) {
   if (side === "rx") {
-    showTip(e, `<b>${esc(d.name)}</b> in ${c.id} <span class="muted">${esc(c.name)}</span><br>` +
+    showTip(e, `<b>${esc(d.name)}</b> in ${c.id} <span class="muted">${esc(c.name)}</span>` + (state.levels ? ` · ${dbText(levelOf(d.name, "rx", c.id))}` : "") + `<br>` +
       (c.subDevice ? `← ${esc(c.subDevice)} · ${esc(c.subChannel)}` : `<span class="muted">Not routed</span>`));
   } else {
     const dests = state.routes.filter((r) => r.srcDevice === d.name && r.srcChannel === c.id);
-    showTip(e, `<b>${esc(d.name)}</b> out ${c.id} <span class="muted">${esc(c.name)}</span><br>` +
+    showTip(e, `<b>${esc(d.name)}</b> out ${c.id} <span class="muted">${esc(c.name)}</span>` + (state.levels ? ` · ${dbText(levelOf(d.name, "tx", c.id))}` : "") + `<br>` +
       (dests.length ? dests.map((r) => `→ ${esc(r.dstDevice)} in ${r.dstChannel}`).join("<br>") : `<span class="muted">Not routed</span>`));
   }
 }
@@ -419,7 +506,7 @@ function makeDraggable(handle, n) {
       else {
         // A click: select the device and toggle its channel list.
         state.selected = id;
-        if (state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+        toggleExpanded(id);
         persistLayout();
         render();
       }
@@ -503,7 +590,10 @@ $("btn-fit").onclick = fit;
 $("btn-expand").onclick = () => {
   const ns = nodes();
   const allOpen = ns.every((n) => state.expanded.has(n.id));
-  for (const n of ns) allOpen ? state.expanded.delete(n.id) : state.expanded.add(n.id);
+  // Work from the bottom up so each block's shift carries the ones below it.
+  const pos = state.positions[state.mode] || {};
+  const order = [...ns].sort((a, b) => (pos[b.id]?.y ?? 0) - (pos[a.id]?.y ?? 0));
+  for (const n of order) toggleExpanded(n.id, !allOpen);
   persistLayout();
   render();
 };
@@ -564,8 +654,27 @@ async function poll() {
   }
 }
 
+// Poll signal levels several times a second when the server provides them.
+let levelsMisses = 0;
+async function pollLevels() {
+  let delay = 250;
+  try {
+    const res = await fetch("api/levels", { cache: "no-store" });
+    if (res.status === 404) { state.levels = null; applyLevels(); return; } // server has no levels feed
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    state.levels = data.devices || {};
+    levelsMisses = 0;
+    if (!dragging) applyLevels();
+  } catch {
+    if (++levelsMisses > 8) { state.levels = null; applyLevels(); delay = 3000; }
+  }
+  setTimeout(pollLevels, delay);
+}
+
 setMode(state.mode);
 poll();
+pollLevels();
 window.addEventListener("resize", () => render());
 // Re-fit when the canvas first gets its real size, until the user pans or zooms.
 let userMoved = false;

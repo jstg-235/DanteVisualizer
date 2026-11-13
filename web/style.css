@@ -121,3 +121,25 @@ body.dropping main::after {
 
 .hint { font-size: 12px; color: var(--muted); padding: 6px 16px; border-top: 1px solid var(--border); background: var(--surface); }
 @media (max-width: 640px) { .hint { display: none; } .status { width: 100%; margin-left: 0; } }
+
+/* signal indicators */
+:root { --sig-on: #16a34a; --sig-hot: #eab308; --sig-clip: #dc2626; --sig-off: #c9ced6; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --sig-on: #22c55e; --sig-hot: #facc15; --sig-clip: #f87171; --sig-off: #3a4252; } }
+:root[data-theme="dark"] { --sig-on: #22c55e; --sig-hot: #facc15; --sig-clip: #f87171; --sig-off: #3a4252; }
+.node .sig { display: none; }
+body.has-levels .node .sig { display: inline; fill: var(--sig-off); }
+.node .sig.on { fill: var(--sig-on); }
+.node .sig.hot { fill: var(--sig-hot); }
+.node .sig.clip { fill: var(--sig-clip); }
+.node .sig.unknown { fill: none; stroke: var(--sig-off); stroke-dasharray: 2 2; }
+.node .live-count { font-size: 11.5px; fill: var(--muted); }
+.node .live-count.on { fill: var(--sig-on); font-weight: 600; }
+body.has-levels .wire.single { opacity: .22; }
+body.has-levels .wire.single.live { opacity: .95; stroke-width: 2; }
+body.has-levels .wire.bundle { opacity: .25; }
+body.has-levels .wire.bundle.live { opacity: .8; }
+.bundle-label.live rect { stroke: var(--sig-on); stroke-width: 2; }
+.wire.live { animation: flow 1s linear infinite; stroke-dasharray: 14 6; }
+@keyframes flow { to { stroke-dashoffset: -20; } }
+@media (prefers-reduced-motion: reduce) { .wire.live { animation: none; stroke-dasharray: none; } }
+body.has-levels .wire:hover, body.has-levels .wire.hot { opacity: 1; }

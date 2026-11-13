@@ -7,6 +7,11 @@ Data sources (pick one):
                         The file is re-read whenever it changes, so anything that keeps
                         rewriting it (see --refresh-cmd) makes the diagram live.
   --refresh-cmd CMD     With --snapshot: run CMD every --refresh seconds to rewrite the snapshot.
+  --levels FILE.json    Signal levels written by the metering helper on the Mac:
+                        {"devices": {"<name>": {"t": <unix time>, "tx": [raw...], "rx": [raw...]}}}
+                        raw is Dante's 1 byte per channel: raw/2 = -dBFS, 254/255 = muted.
+                        Served at /api/levels in dBFS; a device not updated for 3 s is marked stale.
+  --demo-levels         Make up moving levels on routed channels, for trying the app without devices.
 
 Only reads the network; never changes routes or settings.
 
@@ -21,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+import random
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -83,6 +90,56 @@ def model_from_snapshot(path):
             "capturedAt": snap.get("captured_at"), "devices": devices}
 
 
+STALE_AFTER = 3.0
+
+
+def raw_to_db(raw):
+    """Dante metering byte -> dBFS, or None when muted / no value."""
+    if raw is None or raw >= 254:
+        return None
+    return -raw / 2.0
+
+
+def levels_from_file(path):
+    data = json.loads(Path(path).read_text())
+    now = time.time()
+    out = {}
+    for name, d in (data.get("devices") or {}).items():
+        t = d.get("t") or 0
+        out[name] = {
+            "age": round(now - t, 2),
+            "stale": now - t > STALE_AFTER,
+            "tx": [raw_to_db(v) for v in d.get("tx") or []],
+            "rx": [raw_to_db(v) for v in d.get("rx") or []],
+        }
+    return {"t": now, "devices": out}
+
+
+def demo_levels(model):
+    """Plausible moving levels: routed channels carry signal, a few sit silent."""
+    now = time.time()
+    used_tx = {}
+    for d in model["devices"]:
+        for c in d["rx"]:
+            if c["subDevice"]:
+                used_tx.setdefault(c["subDevice"], set()).add(c["subChannel"])
+    out = {}
+    for d in model["devices"]:
+        def lvl(seed, active):
+            if not active or seed % 7 == 0:
+                return None
+            v = -30 + 22 * math.sin(now * (0.7 + (seed % 5) * 0.3) + seed) + random.uniform(-3, 3)
+            return round(min(0.0, v), 1)
+        names = used_tx.get(d["name"], set())
+        h = sum(map(ord, d["name"]))
+        out[d["name"]] = {
+            "age": 0, "stale": False,
+            "tx": [lvl(h + c["id"], c["name"] in names or str(c["id"]) in names) for c in d["tx"]],
+            "rx": [lvl(h + c["id"], bool(c["subDevice"])) for c in d["rx"]],
+        }
+    return {"t": now, "devices": out}
+
+
 class Source:
     def __init__(self, args):
         self.args = args
@@ -124,6 +181,8 @@ def main():
     src.add_argument("--preset")
     src.add_argument("--snapshot")
     ap.add_argument("--refresh-cmd")
+    ap.add_argument("--levels")
+    ap.add_argument("--demo-levels", action="store_true")
     ap.add_argument("--refresh", type=float, default=5.0, help="seconds between refreshes (default 5)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8770)
@@ -139,7 +198,25 @@ def main():
         def __init__(self, *a, **kw):
             super().__init__(*a, directory=str(WEB), **kw)
 
+        def send_json(self, status, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
+            if self.path.split("?")[0] == "/api/levels":
+                if args.levels:
+                    try:
+                        return self.send_json(200, levels_from_file(args.levels))
+                    except (OSError, ValueError) as e:
+                        return self.send_json(503, {"error": str(e)})
+                if args.demo_levels and source.get():
+                    return self.send_json(200, demo_levels(source.get()))
+                return self.send_json(404, {"error": "no levels feed"})
             if self.path.split("?")[0] == "/api/snapshot":
                 model = source.get()
                 if model is None:
