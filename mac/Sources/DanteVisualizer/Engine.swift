@@ -5,8 +5,9 @@ import Foundation
 ///
 /// With the daemon (the normal case) the server follows its live event stream, so routes,
 /// devices and levels update the moment they change, and the page can ask a device to
-/// blink its identify LED. Without it, the server re-reads a snapshot every 10 s and the
-/// metering helper writes levels.json, as before.
+/// blink its identify LED. The metering helper then only listens, for devices whose levels
+/// the daemon doesn't pass on. Without the daemon, the server re-reads a snapshot every 10 s
+/// and the helper does all the metering, as before.
 ///
 /// Towards the devices this sends only metering start/stop (as Dante Controller does)
 /// and identify, when someone presses Identify.
@@ -71,7 +72,7 @@ final class Engine {
                 self.usingDaemon = self.startDaemon()
                 self.daemonMetering = self.usingDaemon && metering
                 try self.startServer()
-                if metering && !self.usingDaemon { try self.startMeter() }
+                if metering { try self.startMeter() }
                 self.waitForServer()
             } catch {
                 self.state = .failed(error.localizedDescription)
@@ -110,7 +111,6 @@ final class Engine {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: ["on": on])
             URLSession.shared.dataTask(with: req).resume()
-            return
         }
         DispatchQueue.global().async {
             if on, !self.meteringOn { try? self.startMeter() }
@@ -166,11 +166,10 @@ final class Engine {
             "--refresh", "10",
             "--port", String(port),
         ]
+        args += ["--levels", dataDir.appendingPathComponent("levels.json").path]
         if usingDaemon {
             args += ["--daemon", "http://127.0.0.1:\(Engine.daemonPort)"]
             if daemonMetering { args.append("--metering") }
-        } else {
-            args += ["--levels", dataDir.appendingPathComponent("levels.json").path]
         }
         server = try launch(venvPython, args, log: "server.log")
         server?.terminationHandler = { [weak self] p in
@@ -228,9 +227,13 @@ final class Engine {
         return ok
     }
 
+    /// Without the daemon the helper does all the metering. With it, the helper only listens
+    /// (--dry-run, sends nothing) for devices that announce signal presence in their
+    /// heartbeats, which the daemon doesn't pass on (e.g. Fourier, Universal Audio).
     private func startMeter() throws {
         let script = engineDir.appendingPathComponent("probe/run_meter_daemon.sh")
-        meter = try launch(URL(fileURLWithPath: "/bin/zsh"), [script.path], log: "meter.log")
+        meter = try launch(URL(fileURLWithPath: "/bin/zsh"), [script.path] + (usingDaemon ? ["--dry-run"] : []),
+                           log: "meter.log")
     }
 
     private func waitForServer() {

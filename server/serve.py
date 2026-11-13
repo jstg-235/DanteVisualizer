@@ -198,12 +198,11 @@ class Source:
             return self.model
 
 
-def refresher(cmd, every, feed=None):
+def refresher(cmd, every):
+    # Keeps running with the daemon too: the snapshot is the fallback, and the metering
+    # helper reads device names from it. With the daemon up, `netaudio device list` asks it.
     while True:
         started = time.time()
-        if feed and feed.connected:  # the daemon keeps everything current; no need to re-read
-            time.sleep(every)
-            continue
         try:
             subprocess.run(cmd, shell=True, check=False, timeout=max(30, every * 4))
         except subprocess.TimeoutExpired:
@@ -237,7 +236,7 @@ def main():
         feed.set_metering(True)
     source = Source(args, feed)
     if args.refresh_cmd:
-        threading.Thread(target=refresher, args=(args.refresh_cmd, args.refresh, feed), daemon=True).start()
+        threading.Thread(target=refresher, args=(args.refresh_cmd, args.refresh), daemon=True).start()
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -300,7 +299,21 @@ def main():
                 if wait is not None and wait.isdigit():
                     feed.wait_for_change(int(wait), 25)
             if path == "/api/levels" and feed:
+                # The daemon's levels, plus the helper's file (--levels) for devices the daemon
+                # has none for: some (e.g. Fourier, Universal Audio) only announce signal presence
+                # in their heartbeats, which the daemon doesn't pass on.
                 lv = feed.levels()
+                if args.levels and feed.metering:
+                    try:
+                        extra = levels_from_file(args.levels)["devices"]
+                    except (OSError, ValueError):
+                        extra = {}
+                    for name, d in extra.items():
+                        if lv is None:
+                            lv = {"t": time.time(), "devices": {}}
+                        cur = lv["devices"].get(name)
+                        if cur is None or (cur["stale"] and not d["stale"]):
+                            lv["devices"][name] = d
                 if lv is not None:
                     return self.send_json(200, lv)
             if self.path.split("?")[0] == "/api/levels":
