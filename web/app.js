@@ -557,7 +557,9 @@ async function poll() {
     const res = await fetch("api/snapshot", { cache: "no-store" });
     if (!res.ok) throw new Error(res.statusText);
     const model = await res.json();
-    if (!dragging && JSON.stringify(model) !== JSON.stringify(state.model)) setModel(model);
+    // Redraw only when the network itself changed, not just the capture time.
+    const same = (a, b) => a && b && JSON.stringify({ ...a, capturedAt: 0 }) === JSON.stringify({ ...b, capturedAt: 0 });
+    if (!dragging && !same(model, state.model)) setModel(model);
     if (model.source === "live") pollTimer = setTimeout(poll, 2000);
   } catch {
     if (!state.model) showStatus("Open a Dante Controller preset (.xml) or start the server to see your network.");
