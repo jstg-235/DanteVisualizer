@@ -1,0 +1,7 @@
+# Network presets and live snapshots describe a real installation; keep them out of this public repo.
+samples/
+*.xml
+live_snapshot.json
+__pycache__/
+.venv/
+.DS_Store
