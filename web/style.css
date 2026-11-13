@@ -118,6 +118,8 @@ body.dropping main::after {
 .panel .swatch { width: 10px; height: 10px; border-radius: 3px; margin-top: 4px; flex: none; }
 .panel .close { position: absolute; right: 8px; top: 8px; border: none; font-size: 18px; padding: 0 8px; }
 .panel p { margin: 0; font-size: 12.5px; }
+.panel p:has(.identify) { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
+.panel .identify:disabled { opacity: .6; cursor: default; }
 
 .hint { font-size: 12px; color: var(--muted); padding: 6px 16px; border-top: 1px solid var(--border); background: var(--surface); }
 @media (max-width: 640px) { .hint { display: none; } .status { width: 100%; margin-left: 0; } }

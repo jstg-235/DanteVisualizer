@@ -1,15 +1,22 @@
 import Foundation
 
-/// Runs the Python side of the app: the diagram server (which also refreshes the
-/// network snapshot) and the metering helper. Everything is read-only towards the
-/// devices except the metering start/stop requests the helper sends.
+/// Runs the Python side of the app: the netaudio daemon, the diagram server, and (only
+/// when the daemon can't run) the snapshot refresh and metering helper.
+///
+/// With the daemon (the normal case) the server follows its live event stream, so routes,
+/// devices and levels update the moment they change, and the page can ask a device to
+/// blink its identify LED. Without it, the server re-reads a snapshot every 10 s and the
+/// metering helper writes levels.json, as before.
+///
+/// Towards the devices this sends only metering start/stop (as Dante Controller does)
+/// and identify, when someone presses Identify.
 ///
 /// Layout:
 ///   <App>.app/Contents/Resources/engine/   web/, server/, probe/, requirements.txt (read-only)
 ///   ~/Library/Application Support/Dante Visualizer/
 ///       venv/        Python environment with netaudio, made on first launch
 ///       data/        live_snapshot.json, levels.json
-///       logs/        server.log, meter.log, setup.log
+///       logs/        server.log, daemon.log, meter.log, setup.log
 final class Engine {
     enum State: Equatable { case idle, settingUp(String), starting, running, failed(String) }
 
@@ -23,6 +30,13 @@ final class Engine {
     private(set) var port: Int = 0
     private var server: Process?
     private var meter: Process?
+    private var daemon: Process?          // nil when there's no daemon or it was already running
+    private(set) var usingDaemon = false
+    private var daemonMetering = false
+    static let daemonPort = 4780
+    /// Dante Controller holds the standard metering port (8752), and the daemon won't start
+    /// without its own. 8762 is the metering helper's.
+    static let daemonMeteringPort = "8772"
     var onState: ((State) -> Void)?
     private(set) var state: State = .idle { didSet { let s = state; DispatchQueue.main.async { self.onState?(s) } } }
 
@@ -54,8 +68,10 @@ final class Engine {
                 self.state = .starting
                 // A steady port keeps the page's saved layouts (stored per address) between launches.
                 self.port = Engine.freePort(preferred: Array(8770...8779))
+                self.usingDaemon = self.startDaemon()
+                self.daemonMetering = self.usingDaemon && metering
                 try self.startServer()
-                if metering { try self.startMeter() }
+                if metering && !self.usingDaemon { try self.startMeter() }
                 self.waitForServer()
             } catch {
                 self.state = .failed(error.localizedDescription)
@@ -69,18 +85,33 @@ final class Engine {
         DispatchQueue.global().async {
             self.stopMeterSync()
             if let s = self.server, s.isRunning {
-                s.terminate()
-                Engine.wait(for: s, seconds: 2)
+                s.terminate()                   // SIGTERM: with the daemon, the server releases metering first
+                Engine.wait(for: s, seconds: 4)
                 if s.isRunning { kill(s.processIdentifier, SIGKILL) }
             }
             self.server = nil
+            if let d = self.daemon, d.isRunning {
+                d.interrupt()
+                Engine.wait(for: d, seconds: 3)
+                if d.isRunning { d.terminate() }
+            }
+            self.daemon = nil
             DispatchQueue.main.async(execute: done)
         }
     }
 
-    var meteringOn: Bool { meter?.isRunning ?? false }
+    var meteringOn: Bool { usingDaemon ? daemonMetering : (meter?.isRunning ?? false) }
 
     func setMetering(_ on: Bool) {
+        if usingDaemon {
+            daemonMetering = on
+            var req = URLRequest(url: url.appendingPathComponent("api/metering"))
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["on": on])
+            URLSession.shared.dataTask(with: req).resume()
+            return
+        }
         DispatchQueue.global().async {
             if on, !self.meteringOn { try? self.startMeter() }
             if !on { self.stopMeterSync() }
@@ -109,12 +140,13 @@ final class Engine {
         return env
     }
 
-    private func launch(_ exe: URL, _ args: [String], log name: String) throws -> Process {
+    private func launch(_ exe: URL, _ args: [String], log name: String,
+                        extraEnv: [String: String] = [:]) throws -> Process {
         let p = Process()
         p.executableURL = exe
         p.arguments = args
         p.currentDirectoryURL = engineDir
-        p.environment = environment
+        p.environment = environment.merging(extraEnv) { _, new in new }
         let logURL = logsDir.appendingPathComponent(name)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: logURL)
@@ -126,18 +158,74 @@ final class Engine {
 
     private func startServer() throws {
         let probe = engineDir.appendingPathComponent("probe")
-        server = try launch(venvPython, [
+        var args = [
             engineDir.appendingPathComponent("server/serve.py").path,
+            // The snapshot and its refresh stay as the fallback whenever the daemon is unreachable.
             "--snapshot", dataDir.appendingPathComponent("live_snapshot.json").path,
             "--refresh-cmd", "\"\(probe.appendingPathComponent("refresh_snapshot.sh").path)\"",
             "--refresh", "10",
-            "--levels", dataDir.appendingPathComponent("levels.json").path,
             "--port", String(port),
-        ], log: "server.log")
+        ]
+        if usingDaemon {
+            args += ["--daemon", "http://127.0.0.1:\(Engine.daemonPort)"]
+            if daemonMetering { args.append("--metering") }
+        } else {
+            args += ["--levels", dataDir.appendingPathComponent("levels.json").path]
+        }
+        server = try launch(venvPython, args, log: "server.log")
         server?.terminationHandler = { [weak self] p in
             guard let self, self.state == .running || self.state == .starting else { return }
             self.state = .failed("The diagram server stopped (exit \(p.terminationStatus)). See logs/server.log.")
         }
+    }
+
+    /// Uses a netaudio daemon that's already running, or starts one (`netaudio daemon run`)
+    /// on the Dante interface. Returns false if neither works within a few seconds; the app
+    /// then runs the way it did before the daemon (snapshot refresh and metering helper).
+    private func startDaemon() -> Bool {
+        if Engine.daemonAnswers() { return true }
+        state = .settingUp("Starting the netaudio daemon…")
+        var args = ["daemon", "run"]
+        // Pin it to the Dante port: on some Macs it trips over other link-local ports otherwise.
+        if let iface = danteInterface() { args = ["--interface", iface] + args }
+        let exe = venvDir.appendingPathComponent("bin/netaudio")
+        guard let d = try? launch(exe, args, log: "daemon.log",
+                                  extraEnv: ["NETAUDIO_METERING_PORT": Engine.daemonMeteringPort]) else { return false }
+        for _ in 0..<40 {
+            if !d.isRunning { break }
+            if Engine.daemonAnswers() { daemon = d; return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        if d.isRunning { d.terminate() }
+        return false
+    }
+
+    private func danteInterface() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = [engineDir.appendingPathComponent("probe/dante_iface.sh").path]
+        p.environment = environment
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        let name = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.terminationStatus == 0 && !name.isEmpty ? name : nil
+    }
+
+    static func daemonAnswers() -> Bool {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(daemonPort)/devices")!)
+        req.timeoutInterval = 0.5
+        let sem = DispatchSemaphore(value: 0)
+        var ok = false
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            ok = (resp as? HTTPURLResponse)?.statusCode == 200
+            sem.signal()
+        }.resume()
+        sem.wait()
+        return ok
     }
 
     private func startMeter() throws {

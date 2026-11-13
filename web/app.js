@@ -414,11 +414,34 @@ function renderPanel(byId) {
     <button class="close" aria-label="Close">×</button>
     <h2>${esc(d.name)}</h2>
     <p class="muted">${esc([d.manufacturer, d.model].filter(Boolean).join(" "))}${d.sampleRate ? ` · ${d.sampleRate / 1000} kHz` : ""} · ${d.rx.length} in / ${d.tx.length} out</p>
+    ${canIdentify(d) ? `<p><button class="identify" title="Blink this device's identify LED so you can find it in the rack">Identify</button> <span class="muted identify-msg"></span></p>` : ""}
     <h3>Receiving from</h3>
     <ul>${[...into].map(([o, rs]) => row(o, rs, "in")).join("") || '<li class="muted">Nothing</li>'}</ul>
     <h3>Sending to</h3>
     <ul>${[...outOf].map(([o, rs]) => row(o, rs, "out")).join("") || '<li class="muted">Nothing</li>'}</ul>`;
   panel.querySelector(".close").onclick = () => { state.selected = null; render(); };
+  const idBtn = panel.querySelector(".identify");
+  if (idBtn) idBtn.onclick = () => identify(d.name, idBtn, panel.querySelector(".identify-msg"));
+}
+
+// ---------- identify ----------
+// Only on the live network through the netaudio daemon, and only for devices that support it.
+function canIdentify(d) {
+  return state.model?.source === "live" && state.model.via === "daemon" && d.online && d.canIdentify !== false;
+}
+async function identify(name, btn, msg) {
+  btn.disabled = true;
+  msg.textContent = "Sending…";
+  try {
+    const res = await fetch("api/identify", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    msg.textContent = res.ok ? "Look for the blinking light" : `Couldn't identify: ${data.error || res.statusText}`;
+  } catch {
+    msg.textContent = "Couldn't reach the server";
+  }
+  setTimeout(() => { btn.disabled = false; }, 3000);
 }
 function groupBy(list, f) {
   const m = new Map();
@@ -706,7 +729,8 @@ function setModel(model, { keepLayout = false } = {}) {
   }
   document.body.classList.add("loaded");
   const missing = state.routes.filter((r) => r.missing).length;
-  showStatus(`${{ live: "Live", setup: "Saved setup" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
+  const via = model.via === "daemon" ? " (instant updates)" : "";
+  showStatus(`${{ live: "Live" + via, setup: "Saved setup" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
   render();
   if (first && !keepLayout) fit();
 }
@@ -719,17 +743,29 @@ function showStatus(text, error = false) {
 
 let pollTimer = null;
 function stopPolling() { clearTimeout(pollTimer); pollTimer = null; }
+// With the netaudio daemon behind the server, each request waits until the network changes
+// (long poll on the model's version), so routes and devices update the moment they change.
+// Otherwise the server's snapshot is re-read every 2 s.
 async function poll() {
+  const live = state.model?.source === "live";
+  const wait = live && state.model.via === "daemon" ? `?wait=${state.model.version}` : "";
   try {
-    const res = await fetch("api/snapshot", { cache: "no-store" });
+    const res = await fetch("api/snapshot" + wait, { cache: "no-store" });
     if (!res.ok) throw new Error(res.statusText);
     const model = await res.json();
-    // Redraw only when the network itself changed, not just the capture time.
-    const same = (a, b) => a && b && JSON.stringify({ ...a, capturedAt: 0 }) === JSON.stringify({ ...b, capturedAt: 0 });
-    if (!dragging && !same(model, state.model)) setModel(model);
-    if (model.source === "live") pollTimer = setTimeout(poll, 2000);
+    if (state.model && state.model.source !== "live") return; // a preset or setup was opened meanwhile
+    // Redraw only when the network itself changed, not just the capture time or version.
+    const same = (a, b) => a && b && JSON.stringify({ ...a, capturedAt: 0, version: 0 }) === JSON.stringify({ ...b, capturedAt: 0, version: 0 });
+    if (dragging) {
+      pollTimer = setTimeout(poll, 300); // apply after the drag, without losing the change
+      return;
+    }
+    if (!same(model, state.model)) setModel(model);
+    else state.model.version = model.version;
+    if (model.source === "live") pollTimer = setTimeout(poll, model.via === "daemon" ? 0 : 2000);
   } catch {
     if (!state.model) showStatus("Open a Dante Controller preset (.xml) or start the server to see your network.");
+    else if (state.model.source === "live") pollTimer = setTimeout(poll, 3000);
   }
 }
 
