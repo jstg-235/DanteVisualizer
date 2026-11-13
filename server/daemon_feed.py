@@ -239,7 +239,7 @@ class DaemonFeed:
     def levels(self):
         """Levels in the app's /api/levels shape, keyed by device name, or None without any."""
         with self.cond:
-            if not self.connected or not self.meters:
+            if not self.connected or not self.meters or not self.metering:
                 return None
             now = time.time()
             out = {}
