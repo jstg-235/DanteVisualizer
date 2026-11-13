@@ -599,7 +599,7 @@ $("btn-expand").onclick = () => {
 };
 $("file").addEventListener("change", async (e) => {
   const f = e.target.files[0];
-  if (f) openPresetText(await f.text());
+  if (f) openFileText(await f.text(), f.name);
   e.target.value = "";
 });
 document.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dropping"); });
@@ -608,30 +608,100 @@ document.addEventListener("drop", async (e) => {
   e.preventDefault();
   document.body.classList.remove("dropping");
   const f = e.dataTransfer.files[0];
-  if (f) openPresetText(await f.text());
+  if (f) openFileText(await f.text(), f.name);
 });
 
-function openPresetText(text) {
-  try { setModel(parsePresetXml(text)); stopPolling(); }
-  catch (err) { showStatus(err.message, true); }
+function openFileText(text, filename = "") {
+  try {
+    if (text.trimStart().startsWith("{")) openSetup(JSON.parse(text), filename);
+    else { stopPolling(); setModel(parsePresetXml(text)); }
+  } catch (err) { showStatus(err.message || String(err), true); }
 }
 
+// ---------- saved setups ----------
+// A setup file holds the layout (block positions for both views, opened blocks,
+// colours, zoom) together with the network it was made for, so it can be reopened
+// on its own or laid over the live network.
+const SETUP_FORMAT = "dante-visualizer-setup";
+
+function currentSetup() {
+  return {
+    format: SETUP_FORMAT,
+    version: 1,
+    name: state.model.name,
+    savedAt: new Date().toISOString(),
+    mode: state.mode,
+    view: state.view,
+    positions: state.positions,
+    expanded: [...state.expanded],
+    colors: Object.fromEntries(state.colors),
+    network: { ...state.model, levels: undefined },
+  };
+}
+
+function saveSetup() {
+  if (!state.model) return;
+  const setup = currentSetup();
+  const stamp = setup.savedAt.slice(0, 16).replace("T", " ").replace(":", "-");
+  const safe = state.model.name.replace(/[^\w .()-]+/g, "_").trim() || "network";
+  const blob = new Blob([JSON.stringify(setup, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${safe} setup ${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  showStatus(`Saved setup for ${state.model.name}`);
+}
+
+function openSetup(setup, filename) {
+  if (setup?.format !== SETUP_FORMAT || !setup.network?.devices) throw new Error(`${filename || "This file"} isn't a Dante Visualizer setup.`);
+  const applyLayout = () => {
+    state.positions = structuredClone(setup.positions || {});
+    state.expanded = new Set(setup.expanded || []);
+    for (const [name, color] of Object.entries(setup.colors || {})) state.colors.set(name, color);
+    state.mode = setup.mode === "flow" ? "flow" : "network";
+    save("dv.mode", state.mode);
+    $("mode-network").setAttribute("aria-pressed", state.mode === "network");
+    $("mode-flow").setAttribute("aria-pressed", state.mode === "flow");
+    if (setup.view) state.view = { ...setup.view };
+    persistLayout();
+  };
+  const live = state.model?.source === "live" && pollTimer;
+  if (live) {
+    // Keep showing the live network, arranged the way the setup says.
+    // Devices the setup doesn't know about are placed below the others.
+    applyLayout();
+    const known = state.model.devices.filter((d) => setup.network.devices.some((x) => x.name === d.name)).length;
+    render();
+    showStatus(`Live: ${state.model.name} · laid out from "${setup.name}" (${known}/${state.model.devices.length} devices matched)`);
+  } else {
+    stopPolling();
+    setModel({ ...setup.network, source: "setup", name: setup.name || setup.network.name }, { keepLayout: true });
+    applyLayout();
+    render();
+  }
+}
+
+$("btn-save").onclick = saveSetup;
+
 // ---------- data ----------
-function setModel(model) {
+function setModel(model, { keepLayout = false } = {}) {
   const first = !state.model || state.model.name !== model.name;
   state.model = model;
   state.routes = buildRoutes(model);
   model.devices.forEach((d, i) => { if (!state.colors.has(d.name)) state.colors.set(d.name, PALETTE[state.colors.size % PALETTE.length]); });
-  if (first) {
+  if (first && !keepLayout) {
     const saved = load(layoutKey(), null);
     state.positions = saved?.positions || {};
     state.expanded = new Set(saved?.expanded || []);
   }
   document.body.classList.add("loaded");
   const missing = state.routes.filter((r) => r.missing).length;
-  showStatus(`${model.source === "live" ? "Live" : "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
+  showStatus(`${{ live: "Live", setup: "Saved setup" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
   render();
-  if (first) fit();
+  if (first && !keepLayout) fit();
 }
 
 function showStatus(text, error = false) {
