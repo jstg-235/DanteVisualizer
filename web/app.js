@@ -466,6 +466,8 @@ function fit() {
     x1 = Math.max(x1, p.x + W); y1 = Math.max(y1, p.y + nodeHeight(n));
   }
   const r = svg.getBoundingClientRect();
+  // The canvas can still be zero-sized on first load; try again once it has a size.
+  if (r.width < 50 || r.height < 50) { requestAnimationFrame(fit); return; }
   const pad = 140;
   const k = Math.min(1.4, Math.max(0.15, Math.min(r.width / (x1 - x0 + pad * 2), r.height / (y1 - y0 + 80))));
   state.view.k = k;
@@ -556,3 +558,8 @@ async function poll() {
 setMode(state.mode);
 poll();
 window.addEventListener("resize", () => render());
+// Re-fit when the canvas first gets its real size, until the user pans or zooms.
+let userMoved = false;
+svg.addEventListener("wheel", () => { userMoved = true; }, { passive: true });
+svg.addEventListener("pointerdown", () => { userMoved = true; });
+new ResizeObserver(() => { if (!userMoved) fit(); }).observe(svg);
