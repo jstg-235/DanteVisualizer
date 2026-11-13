@@ -112,7 +112,7 @@ final class Engine {
                 self.daemonMetering = self.usingDaemon && metering
                 try self.startServer()
                 if metering { try self.startMeter() }
-                if found == .noNetwork { self.watchForDaemon() }
+                if self.usingDaemon { self.superviseDaemon() }
                 self.waitForServer()
             } catch {
                 self.state = .failed(error.localizedDescription)
@@ -236,34 +236,78 @@ final class Engine {
                                   extraEnv: ["NETAUDIO_METERING_PORT": Engine.daemonMeteringPort]) else { return .failed }
         for _ in 0..<40 {
             if !d.isRunning { break }
-            if Engine.daemonAnswers() { daemon = d; return .running }
+            if Engine.daemonAnswers() {
+                daemon = d
+                daemonIface = iface
+                daemonAddr = Engine.ipv4(of: iface)
+                return .running
+            }
             Thread.sleep(forTimeInterval: 0.25)
         }
         if d.isRunning { d.terminate() }
         return .failed
     }
 
-    /// The app started without a Dante network: look for one every 5 s and start the daemon
-    /// on it. If the daemon then can't run, fall back to the helper doing all the metering.
-    private var watchingDaemon = false
-    private func watchForDaemon() {
-        guard !watchingDaemon else { return }
-        watchingDaemon = true
+    /// Keeps the daemon matched to the network while the app runs, checking every 5 s:
+    /// - no Dante network at launch: start the daemon (pinned) once one appears;
+    /// - our daemon stopped: start it again;
+    /// - its port's address changed (e.g. a DHCP address lost for a self-assigned one): the daemon
+    ///   keeps sending from the old address and its metering fails, so restart it on the same port.
+    /// The server's feed reconnects by itself and asks for levels again. If the daemon can't
+    /// start three times running, fall back to the helper doing all the metering.
+    private var daemonIface: String?
+    private var daemonAddr: String?
+    private var supervising = false
+    private func superviseDaemon() {
+        guard !supervising else { return }
+        supervising = true
         DispatchQueue.global(qos: .utility).async {
-            defer { self.watchingDaemon = false }
+            defer { self.supervising = false }
+            var failures = 0
             while self.usingDaemon, self.server?.isRunning == true {
                 Thread.sleep(forTimeInterval: 5)
                 guard self.server?.isRunning == true else { return }
+                if let d = self.daemon, d.isRunning, let iface = self.daemonIface {
+                    let addr = Engine.ipv4(of: iface)
+                    if addr == nil || addr == self.daemonAddr { continue }   // unchanged, or no address yet
+                    NSLog("Dante port %@ changed address %@ -> %@; restarting the netaudio daemon",
+                          iface, self.daemonAddr ?? "none", addr!)
+                    d.interrupt()
+                    Engine.wait(for: d, seconds: 3)
+                    if d.isRunning { d.terminate(); Engine.wait(for: d, seconds: 1) }
+                    self.daemon = nil
+                } else if Engine.daemonAnswers() {
+                    continue                    // fine (or someone else's daemon, which we leave alone)
+                }
                 switch self.startDaemon(announce: false) {
-                case .running: return          // the server's feed connects and re-sends metering requests
-                case .noNetwork: continue
+                case .running, .noNetwork: failures = 0
                 case .failed:
-                    self.usingDaemon = false
-                    if self.meter?.isRunning == true { self.stopMeterSync(); try? self.startMeter() }
-                    return
+                    failures += 1
+                    if failures >= 3 {
+                        self.usingDaemon = false
+                        if self.meter?.isRunning == true { self.stopMeterSync(); try? self.startMeter() }
+                        return
+                    }
                 }
             }
         }
+    }
+
+    /// The IPv4 address of a network port, or nil when it has none.
+    static func ipv4(of name: String) -> String? {
+        var ifap: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifap) == 0, let first = ifap else { return nil }
+        defer { freeifaddrs(ifap) }
+        for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = p.pointee
+            guard String(cString: ifa.ifa_name) == name, let addr = ifa.ifa_addr,
+                  addr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                return String(cString: host)
+            }
+        }
+        return nil
     }
 
     private func danteInterface() -> String? {

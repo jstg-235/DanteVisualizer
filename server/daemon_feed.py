@@ -116,6 +116,7 @@ class DaemonFeed:
         self.version = 0
         self.metering = False
         self._metered = set()      # server names we asked to meter
+        self._metered_at = {}      # server name -> when the daemon accepted our request
 
     # ---- connection ----
     def start(self):
@@ -309,6 +310,13 @@ class DaemonFeed:
             with self.cond:
                 if not self.connected:
                     continue
+                # Accepted but no levels for 10 s (e.g. the Mac's address changed under the daemon):
+                # forget it so it is asked again below.
+                for sn in list(self._metered):
+                    last = max(self._metered_at.get(sn, 0), (self.meters.get(sn) or {}).get("t", 0))
+                    if now - last > 10:
+                        self._metered.discard(sn)
+                        self.log(f"no levels from {sn} for 10 s; asking again")
                 todo = [sn for sn, d in self.devices.items()
                         if sn not in self._metered and now - tried.get(sn, 0) > 30
                         and d.get("online", True) is not False
@@ -324,6 +332,7 @@ class DaemonFeed:
                 with self.cond:
                     if ok:
                         self._metered.add(sn)
+                        self._metered_at[sn] = time.time()
                         tried.pop(sn, None)
                     else:
                         tried[sn] = now
