@@ -277,6 +277,7 @@ function render() {
 
   for (const n of ns) drawNode(n, groups);
   applyLevels();
+  updateExpandButton();
   viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
   renderPanel(byId);
 }
@@ -543,7 +544,7 @@ svg.addEventListener("wheel", (e) => {
   e.preventDefault();
   const r = svg.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
-  const k = Math.min(3, Math.max(0.15, state.view.k * Math.exp(-e.deltaY * 0.0015)));
+  const k = Math.min(3, Math.max(0.05, state.view.k * Math.exp(-e.deltaY * 0.0015)));
   state.view.x = mx - (mx - state.view.x) * (k / state.view.k);
   state.view.y = my - (my - state.view.y) * (k / state.view.k);
   state.view.k = k;
@@ -552,24 +553,20 @@ svg.addEventListener("wheel", (e) => {
 
 function fit() {
   if (!state.model) return;
-  const pos = state.positions[state.mode];
-  const ns = nodes().filter((n) => pos[n.id]);
-  if (!ns.length) return;
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const n of ns) {
-    const p = pos[n.id];
-    x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
-    x1 = Math.max(x1, p.x + W); y1 = Math.max(y1, p.y + nodeHeight(n));
-  }
   const r = svg.getBoundingClientRect();
   // The canvas can still be zero-sized on first load; try again once it has a size.
   if (r.width < 50 || r.height < 50) { requestAnimationFrame(fit); return; }
-  const pad = 140;
-  const k = Math.min(1.4, Math.max(0.15, Math.min(r.width / (x1 - x0 + pad * 2), r.height / (y1 - y0 + 80))));
-  state.view.k = k;
-  state.view.x = (r.width - (x1 - x0) * k) / 2 - x0 * k;
-  state.view.y = (r.height - (y1 - y0) * k) / 2 - y0 * k;
   render();
+  // Measure everything drawn, including wires that loop below the blocks and
+  // "not found" stubs, not just the blocks themselves.
+  const b = viewport.getBBox();
+  if (!b.width || !b.height) return;
+  const pad = 24;
+  const k = Math.min(1.4, Math.max(0.05, Math.min((r.width - pad * 2) / b.width, (r.height - pad * 2) / b.height)));
+  state.view.k = k;
+  state.view.x = (r.width - b.width * k) / 2 - b.x * k;
+  state.view.y = (r.height - b.height * k) / 2 - b.y * k;
+  viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
 }
 
 // ---------- toolbar ----------
@@ -587,6 +584,16 @@ $("mode-network").onclick = () => setMode("network");
 $("mode-flow").onclick = () => setMode("flow");
 $("btn-layout").onclick = () => { autoLayout(); render(); fit(); };
 $("btn-fit").onclick = fit;
+// Label the button with what it will do next.
+function updateExpandButton() {
+  if (!state.model) return;
+  const allOpen = nodes().every((n) => state.expanded.has(n.id));
+  $("btn-expand").textContent = allOpen ? "Collapse all" : "Expand all";
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "e" || e.key === "E") $("btn-expand").click();
+});
 $("btn-expand").onclick = () => {
   const ns = nodes();
   const allOpen = ns.every((n) => state.expanded.has(n.id));

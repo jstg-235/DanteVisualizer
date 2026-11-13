@@ -13,7 +13,7 @@
       <button id="mode-network" aria-pressed="true" title="Each device once, inputs left and outputs right">Network</button>
       <button id="mode-flow" aria-pressed="false" title="Outputs on the left, inputs on the right, every wire flows left to right">Signal flow</button>
     </div>
-    <button id="btn-expand" title="Show or hide every channel">Channels</button>
+    <button id="btn-expand" title="Open or close every block's channel list (shortcut: E)">Expand all</button>
     <button id="btn-layout" title="Rearrange the blocks automatically">Auto layout</button>
     <button id="btn-fit" title="Zoom to fit">Fit</button>
     <label class="file-btn" title="Open a Dante Controller preset (.xml) or a saved setup (.json)">Open…<input id="file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
@@ -36,7 +36,7 @@
     <aside id="panel" class="panel" hidden></aside>
     <div id="tooltip" class="tooltip" hidden></div>
   </main>
-  <footer class="hint">Drag blocks to arrange · click a block to show its channels · drag the background to pan · scroll to zoom</footer>
+  <footer class="hint">Drag blocks to arrange · click a block to show its channels · E expands or collapses all · drag the background to pan · scroll to zoom</footer>
   <script type="module" src="app.js"></script>
 </body>
 </html>
