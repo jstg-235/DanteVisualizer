@@ -24,11 +24,19 @@
     <button id="btn-fit" class="diagram-only" title="Zoom to fit">Fit</button>
     <button id="btn-bw" class="diagram-only toggle" aria-pressed="false" title="Show the estimated bandwidth of each device-to-device flow on the wires (shortcut: B)">Bandwidth</button>
     <label class="file-btn diagram-only" title="Open a Dante Controller preset (.xml) or a saved setup (.json)">Open…<input id="file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
+    <label class="file-btn diagram-only" title="Lay a preset (.xml) or a saved setup (.json) over the network on screen to see how it differs">Compare…<input id="cmp-file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
     <button id="btn-save" class="diagram-only" title="Save this layout, opened channels, view and network to a file">Save setup</button>
     <span id="status" class="status"></span>
     <button id="btn-problems" class="problems-btn ok" hidden title="Open the monitor sidebar"><span class="pdot" aria-hidden="true"></span><span class="plabel">All good</span></button>
     <button id="btn-live" class="live-btn wait" aria-pressed="true" title="Connecting to the live network"><span class="live-dot" aria-hidden="true"></span><span class="live-label">Connecting…</span></button>
   </header>
+  <div id="cmp-bar" class="cmp-bar diagram-only" hidden>
+    <span id="cmp-summary" class="cmp-summary"></span>
+    <label class="cmp-toggle"><input type="checkbox" id="cmp-ghosts"> Ghost wires</label>
+    <button id="cmp-diff-btn" aria-pressed="false">Differences</button>
+    <button id="cmp-units-btn" aria-pressed="false">Units</button>
+    <button id="cmp-close" class="cmp-x" aria-label="Stop comparing">Stop</button>
+  </div>
   <main>
     <svg id="canvas" aria-label="Dante network diagram">
       <rect id="bg" width="100%" height="100%"></rect>
@@ -43,6 +51,10 @@
       <p class="muted">When the server is running on a Mac on the Dante network, the live network appears here automatically.</p>
     </div>
     <aside id="panel" class="panel" hidden></aside>
+    <aside id="cmp-panel" class="cmp-panel" hidden aria-label="Compare with preset">
+      <button id="cmp-panel-close" class="close" aria-label="Close">×</button>
+      <div id="cmp-panel-body"></div>
+    </aside>
     <aside id="m-side" class="m-side" hidden aria-label="Monitor sidebar">
       <div class="m-side-head"><b>Monitor</b><button id="m-side-open" title="Open the full Monitor view">Open view</button><button id="m-side-close" class="close" aria-label="Close the sidebar">×</button></div>
       <div id="m-side-body"></div>

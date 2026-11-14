@@ -2,6 +2,7 @@ import { parsePresetXml, buildRoutes, rangeText } from "./model.js";
 import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered, monitorState } from "./monitor.js";
 import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
 import { mountHistory, closeHistory } from "./history.js";
+import { initCompare, ghostRoutes, liveMark, refreshCompare, compareLine, ghostText, hideComparePanel } from "./compare-ui.js";
 
 // ---------- geometry ----------
 const W = 250;          // block width
@@ -271,11 +272,13 @@ function render() {
       const laneY = isBackward(a, b) ? floorBetween(ns, a.x, b.x) + 40 + 26 * lane++ : null;
       const failed = g.routes.filter((r) => r.failed).length;
       const d = curve(a, b, laneY);
-      const path = el("path", { d, class: "wire bundle" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : ""), stroke: color, "stroke-width": width }, wiresLayer);
+      const marks = g.routes.map((r) => liveMark(r.id));
+      const mark = marks.includes("differs") ? " cmp-differs" : marks.includes("liveOnly") ? " cmp-liveOnly" : "";
+      const path = el("path", { d, class: "wire bundle" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : "") + mark, stroke: color, "stroke-width": width }, wiresLayer);
       clickable(path, { kind: "bundle", key }, null, null, d, Math.max(12, width + 6));
       const bwText = bw != null ? ` · ${mbpsText(bw)}` : "";
       const mid = placeLabel(path, placed, labelWidth(`${g.routes.length}/${g.routes.length} live` + bwText + (failed ? ` · ${failed} failed` : "")));
-      const label = el("g", { class: "bundle-label" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : ""), transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
+      const label = el("g", { class: "bundle-label" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : "") + mark, transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
       const text = `${g.routes.length} ch` + bwText + (failed ? ` · ${failed} failed` : "");
       el("rect", { x: -(text.length * 3.6 + 8), y: -10, width: text.length * 7.2 + 16, height: 20, rx: 10, stroke: color }, label);
       const t = el("text", { x: 0, y: 4, "text-anchor": "middle" }, label);
@@ -293,7 +296,7 @@ function render() {
         const hot = state.hoverRoute === r.id;
         const d = curve(a, b, back ? laneBase : null);
         const faded = tracing ? !isTraced(r) : dim && !related(r);
-        const path = el("path", { d, class: "wire single" + (faded ? " dim" : "") + (isTraced(r) ? " traced" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : ""), stroke: color }, wiresLayer);
+        const path = el("path", { d, class: "wire single" + (faded ? " dim" : "") + (isTraced(r) ? " traced" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : "") + (liveMark(r.id) ? " cmp-" + liveMark(r.id) : ""), stroke: color }, wiresLayer);
         clickable(path, { kind: "route", id: r.id }, null, null, d, 10);
         live.wires.push({ path, route: r });
         groupPaths.push(path);
@@ -313,6 +316,7 @@ function render() {
       }
     }
   }
+  lane = drawGhosts(ns, byId, placed, lane, { tracing, selDevice, related });
 
   for (const n of ns) drawNode(n, groups);
   applyLevels();
@@ -320,6 +324,89 @@ function render() {
   viewport.setAttribute("transform", `translate(${state.view.x},${state.view.y}) scale(${state.view.k})`);
   renderPanel(byId);
   updateTraceCard();
+}
+
+// ---------- preset preview (ghost wires) ----------
+// With a preset open for comparison, what the preset routes differently from the network
+// is drawn dashed in the source's colour, a little below the live wire for the same blocks.
+// Click one to see what the preset wants and what the network does now. Nothing is sent.
+const GHOST_DY = 9;
+function ghostKey(r) {
+  const src = r.missing ? "?" + r.srcDevice : nodeIdFor(r.srcDevice, "tx");
+  return `ghost:${src}=>${nodeIdFor(r.dstDevice, "rx")}`;
+}
+function tracedGhosts() {
+  const t = state.trace;
+  const gs = ghostRoutes();
+  if (!t || !gs.length) return new Set();
+  let hit = [];
+  if (t.kind === "ghost") hit = gs.filter((g) => (t.id ? g.id === t.id : ghostKey(g) === t.key));
+  else if (t.kind === "channel") hit = gs.filter((g) => t.side === "rx" ? g.dstDevice === t.device && g.dstChannel === t.ch
+                                                                        : g.srcDevice === t.device && g.srcChannel === t.ch);
+  else if (t.kind === "route") {
+    const r = state.routes.find((x) => x.id === t.id);
+    if (r) hit = gs.filter((g) => g.dstDevice === r.dstDevice && g.dstChannel === r.dstChannel);
+  }
+  return new Set(hit.map((g) => g.id));
+}
+function drawGhosts(ns, byId, placed, lane, { tracing, selDevice, related }) {
+  const gs = ghostRoutes();
+  if (!gs.length) return lane;
+  const traced = tracing ? tracedGhosts() : null;
+  const groups = new Map();
+  for (const r of gs) {
+    const dstNode = byId.get(nodeIdFor(r.dstDevice, "rx"));
+    const srcNode = r.missing ? null : byId.get(nodeIdFor(r.srcDevice, "tx"));
+    if (!dstNode || (!r.missing && !srcNode)) continue;
+    const key = ghostKey(r);
+    if (!groups.has(key)) groups.set(key, { srcNode, dstNode, routes: [], srcName: r.srcDevice, key });
+    groups.get(key).routes.push(r);
+  }
+  const down = (p) => ({ x: p.x, y: p.y + GHOST_DY });
+  for (const g of groups.values()) {
+    const color = state.colors.get(g.srcName) || "#888";
+    const lit = tracing && g.routes.some((r) => traced.has(r.id));
+    const dim = tracing ? !lit : selDevice && !g.routes.some(related);
+    const cls = (dim ? " dim" : "") + (lit ? " traced" : "");
+    if (!g.srcNode) {
+      // The preset's source isn't on this network: a short dashed stub with its name.
+      const b = down(portPos(g.dstNode, "rx", g.routes[0].dstChannel));
+      const a = { x: b.x - 90, y: b.y };
+      const stub = el("path", { d: `M${a.x},${a.y} L${b.x},${b.y}`, class: "wire ghost" + cls, stroke: color }, wiresLayer);
+      clickable(stub, { kind: "ghost", key: g.key }, null, null, `M${a.x},${a.y} L${b.x},${b.y}`, 10);
+      const t = el("text", { x: a.x - 6, y: a.y + 4, class: "wire-label ghost-label" + cls, "text-anchor": "end" }, wiresLayer);
+      t.textContent = `preset: ${g.srcName} (not here) · ${g.routes.length} ch`;
+      continue;
+    }
+    if (!state.expanded.has(g.srcNode.id) && !state.expanded.has(g.dstNode.id)) {
+      const a = down(portPos(g.srcNode, "tx")), b = down(portPos(g.dstNode, "rx"));
+      const laneY = isBackward(a, b) ? floorBetween(ns, a.x, b.x) + 40 + 26 * lane++ : null;
+      const d = curve(a, b, laneY);
+      const width = 1.5 + Math.log2(g.routes.length) * 1.2;
+      const path = el("path", { d, class: "wire ghost bundle-ghost" + cls, stroke: color, "stroke-width": width }, wiresLayer);
+      clickable(path, { kind: "ghost", key: g.key }, null, null, d, Math.max(12, width + 6));
+      const mid = placeLabel(path, placed);
+      const label = el("g", { class: "bundle-label ghost-label" + cls, transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
+      const text = `preset · ${g.routes.length} ch`;
+      el("rect", { x: -(text.length * 3.6 + 8), y: -10, width: text.length * 7.2 + 16, height: 20, rx: 10, stroke: color }, label);
+      el("text", { x: 0, y: 4, "text-anchor": "middle" }, label).textContent = text;
+      clickable(label, { kind: "ghost", key: g.key });
+    } else {
+      const laneBase = floorBetween(ns, portPos(g.srcNode, "tx").x, portPos(g.dstNode, "rx").x) + 40 + 26 * lane;
+      let usedLane = false;
+      for (const r of g.routes) {
+        const a = portPos(g.srcNode, "tx", r.srcChannel), b = portPos(g.dstNode, "rx", r.dstChannel);
+        const back = isBackward(a, b);
+        usedLane ||= back;
+        const d = curve(a, b, back ? laneBase : null);
+        const on = tracing && traced.has(r.id);
+        const path = el("path", { d, class: "wire ghost single-ghost" + (tracing ? (on ? " traced" : " dim") : dim ? " dim" : ""), stroke: color }, wiresLayer);
+        clickable(path, { kind: "ghost", id: r.id }, null, null, d, 10);
+      }
+      if (usedLane) lane++;
+    }
+  }
+  return lane;
 }
 
 function drawNode(n, groups) {
@@ -585,6 +672,12 @@ function tracedRoutes() {
     rs = state.routes.filter((r) => t.side === "rx" ? r.dstDevice === t.device && r.dstChannel === t.ch
                                                      : r.srcDevice === t.device && r.srcChannel === t.ch);
   else if (t.kind === "bundle") rs = state.routes.filter((r) => bundleKey(r) === t.key);
+  else if (t.kind === "ghost") {
+    // The live routes on the inputs the preset would route differently.
+    const ids = tracedGhosts();
+    const at = new Set(ghostRoutes().filter((g) => ids.has(g.id)).map((g) => `${g.dstDevice}#${g.dstChannel}`));
+    rs = state.routes.filter((r) => at.has(`${r.dstDevice}#${r.dstChannel}`));
+  }
   return new Set(rs.map((r) => r.id));
 }
 function bundleKey(r) {
@@ -597,6 +690,11 @@ function endsOf(ids) {
   for (const r of state.routes) if (ids.has(r.id)) {
     ends.add(`${r.dstDevice}|rx|${r.dstChannel}`);
     if (r.srcChannel != null) ends.add(`${r.srcDevice}|tx|${r.srcChannel}`);
+  }
+  const gids = tracedGhosts();
+  for (const g of ghostRoutes()) if (gids.has(g.id)) {
+    ends.add(`${g.dstDevice}|rx|${g.dstChannel}`);
+    if (g.srcChannel != null) ends.add(`${g.srcDevice}|tx|${g.srcChannel}`);
   }
   return ends;
 }
@@ -629,7 +727,8 @@ const traceCard = { at: null };
 function updateTraceCard() {
   const ids = tracedRoutes();
   if (state.view$ !== "diagram") { tooltip.hidden = true; closeHistory(); return; }
-  if (!state.trace || (state.trace.kind !== "channel" && !ids?.size)) {
+  const gids = state.trace?.kind === "ghost" ? tracedGhosts() : null;
+  if (!state.trace || (state.trace.kind !== "channel" && !(gids ? gids.size : ids?.size))) {
     if (state.trace) state.trace = null;    // the route went away
     tooltip.hidden = true;
     closeHistory();
@@ -638,7 +737,8 @@ function updateTraceCard() {
   const rs = state.routes.filter((r) => ids.has(r.id));
   const t = state.trace;
   let html;
-  if (t.kind === "route") html = routeText(rs[0]);
+  if (t.kind === "ghost") html = ghostText(ghostRoutes().filter((g) => gids.has(g.id)));
+  else if (t.kind === "route") html = routeText(rs[0]) + compareLine(rs[0].dstDevice, "rx", rs[0].dstChannel);
   else if (t.kind === "channel") html = channelText(t, rs);
   else html = bundleText(rs);
   const targets = historyTargets(t, rs);
@@ -683,12 +783,13 @@ function channelText(t, rs) {
       (r ? `<span class="muted">Source:</span> ${esc(r.srcDevice)} out ${r.srcChannel ?? "?"} <span class="muted">${esc(r.srcChannelName)}</span>` +
            (r.missing ? ` <span class="muted">(not found)</span>` : "")
          : `<span class="muted">Not routed</span>`) +
-      (r?.failed ? `<br><b class="sev-text-critical">Route failed${r.stateLabel ? ": " + esc(r.stateLabel) : ""}</b>` : "");
+      (r?.failed ? `<br><b class="sev-text-critical">Route failed${r.stateLabel ? ": " + esc(r.stateLabel) : ""}</b>` : "") +
+      compareLine(t.device, "rx", t.ch);
   }
   return `<b>${esc(t.device)}</b> out ${c.id} <span class="muted">${esc(c.name)}</span>${lv}<br>` +
     (rs.length ? `<span class="muted">Destination${rs.length > 1 ? `s (${rs.length})` : ""}:</span><br>` +
                  rs.map((r) => `→ ${esc(r.dstDevice)} in ${r.dstChannel} <span class="muted">${esc(r.dstChannelName)}</span>`).join("<br>")
-               : `<span class="muted">Not routed</span>`);
+               : `<span class="muted">Not routed</span>`) + compareLine(t.device, "tx", t.ch);
 }
 function bundleText(rs) {
   const max = 12;
@@ -947,6 +1048,7 @@ function setModel(model, { keepLayout = false } = {}) {
     state.expanded = new Set(saved?.expanded || []);
   }
   document.body.classList.add("loaded");
+  refreshCompare();
   const missing = state.routes.filter((r) => r.missing).length;
   const via = model.via === "daemon" ? " (instant updates)" : "";
   showStatus(`${{ live: "Live" + via, setup: "Saved setup", offline: "Offline" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
@@ -1185,9 +1287,39 @@ initMonitor({
   onSelectDevice: selectDevice,
   hasDevice: (name) => !!state.model?.devices.some((d) => d.name === name),
   onOpenView: () => setView("monitor"),
-  onSidebar: (open) => $("btn-problems").setAttribute("aria-pressed", String(open)),
+  onSidebar: (open) => { $("btn-problems").setAttribute("aria-pressed", String(open)); if (open) hideComparePanel(); },
   getNetwork: () => (state.model ? { model: state.model, routes: state.routes } : null),
   onAvailable(yes) { if (!yes && state.view$ === "monitor") setView("diagram"); },
+});
+
+// ---------- compare with preset ----------
+// Show an input from the differences list: open its block, trace it and bring it to the middle.
+function focusChannel(device, ch) {
+  setView("diagram");
+  const n = nodes().find((x) => x.id === nodeIdFor(device, "rx"));
+  if (!n) { showStatus(`${device} isn't on the diagram right now`); return; }
+  if (!state.expanded.has(n.id)) { toggleExpanded(n.id, true); persistLayout(); }
+  state.trace = { kind: "channel", device, side: "rx", ch };
+  const p = portPos(n, "rx", ch);
+  const k = state.view.k;
+  // Centre it in the part of the canvas the compare panel doesn't cover.
+  const cp = $("cmp-panel");
+  const left = cp.hidden ? 0 : Math.min(cp.offsetLeft + cp.offsetWidth, svg.clientWidth / 2);
+  const cx = (left + svg.clientWidth) / 2;
+  state.view.x = cx - p.x * k;
+  state.view.y = svg.clientHeight / 2 - p.y * k;
+  userMoved = true;
+  const r = svg.getBoundingClientRect();
+  traceCard.at = { x: r.left + cx, y: r.top + svg.clientHeight / 2 };
+  render();
+}
+initCompare({
+  getModel: () => state.model,
+  getRoutes: () => state.routes,
+  redraw: () => render(),
+  focusChannel,
+  closeOthers: () => { if (!$("m-side").hidden) toggleSidebar(); },
+  status: showStatus,
 });
 
 setMode(state.mode);

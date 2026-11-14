@@ -53,6 +53,15 @@ Everything here opens on a click, never on hover, and only reads: nothing change
 - Settings and history live in `~/Library/Application Support/Dante Visualizer/Monitor`. The first run carries over the switch list and history from the standalone Dante Monitor app, if it was used.
 - Try it without devices: `python3 server/serve.py --monitor-demo --demo-levels`, then open http://127.0.0.1:8770. The demo stages a bad cable, a device dropping off, a clock fight and a sample-rate mismatch in turn, and has one failed route.
 
+## Compare with a preset
+
+**Compare…** lays a Dante Controller preset (or a saved setup) over the network on screen, live or not, without replacing it. It only compares: nothing is sent to the devices.
+
+- **Ghost wires.** What the preset routes differently is drawn dashed in the source's colour, just below the live wire for the same blocks (“preset · 8 ch” on a bundle). Live wires the preset would change glow amber; ones the preset leaves empty glow cyan. Click a ghost wire for what the preset wants there and what the network does now. Clicking a channel or wire also says what the preset has on it. **Ghost wires** in the compare bar turns them off.
+- **Compare bar.** Counts of inputs that are the same, differ, are routed only in the preset, only on the network, or can't be shown (their unit or channel isn't on this network). Click a count, or **Differences**, for the list by device; click an input to jump to it.
+- **Unit matcher (Units).** Preset units are paired with network units by name first. The rest get a suggestion from model, channel count, channel labels and a similar name, marked “suggested” (or “best guess, several fit” when e.g. several identical stage boxes fit equally). Pick any unit from the menu, or “Not on this network”; one network unit plays one preset unit. **Accept suggestions** keeps them as your picks. Picks are remembered per preset name in this browser only.
+- The unit map is kept apart from the drawing (`web/compare.js`) so offline patching can reuse it later.
+
 ## Engine (`probe/`)
 
 - `refresh_snapshot.sh` reads devices, channels and routes once (read-only) and writes `live_snapshot.json`.
