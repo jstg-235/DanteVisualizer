@@ -227,12 +227,12 @@ class MonitorService:
         patch("FOH-Console", 1, "Amp-Rack-L", 1, 4)
         patch("FOH-Console", 5, "Amp-Rack-R", 1, 2)
         patch("FOH-Console", 7, "Amp-Rack-R", 3, 2, "error", "No connection")
-        patch("FOH-Console", 1, "Record-Mac", 1, 64)
+        patch("FOH-Console", 1, "Record-Mac", 1, 64, label="Subscribed (multicast)")
         patch("Monitor-Console", 1, "Stagebox-A", 1, 16)
         patch("Monitor-Console", 17, "Stagebox-B", 1, 16)
         world = self.world
         devices = []
-        for name, mf, model, ip, _mac, ntx, _sw, _port in DEVICES:
+        for name, mf, model, ip, mac, ntx, _sw, _port in DEVICES:
             rx = []
             for c in range(1, rx_count.get(name, 0) + 1):
                 r = routes.get((name, c))
@@ -241,6 +241,8 @@ class MonitorService:
                            "stateLabel": r[3] if r else None})
             devices.append({
                 "name": name, "model": model, "manufacturer": mf, "ipv4": ip,
+                "info": {"mac": mac, "encoding": 24, "latencyMs": 1.0 if "Mac" in name else 0.25,
+                         "firmware": "4.2.1.3", "clockRole": "Leader" if name == "FOH-Console" else "Follower"},
                 "sampleRate": 44100 if world and world.rate_odd == name else 48000,
                 "online": not (world and world.offline == name),
                 "tx": [{"id": c, "name": f"{c:02d}"} for c in range(1, ntx + 1)],

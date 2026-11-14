@@ -30,12 +30,22 @@ The app never changes routes or settings. The only requests it sends to devices 
 - Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
 - It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
 
+## Details on click
+
+Everything here opens on a click, never on hover, and only reads: nothing changes on the network.
+
+- **Device info.** Click a block's header: the side panel lists its IP and MAC, the switch port it's plugged into and its ping (from the monitor), sample rate, bit depth, latency, clock role, firmware, flow counts and its estimated bandwidth.
+- **Level history.** The server keeps each channel's loudest level per second for the last hour (in memory, while levels are on). Click a channel row or a single wire and the click card shows a strip chart for 1 minute, 10 minutes or 1 hour: red ticks where it clipped, grey bands where it was silent, and for a wire both the sent and received level. Click on the chart to read the level at that moment.
+- **Bandwidth.** **Bandwidth** in the toolbar (or B) labels each device-to-device flow with its estimated Mb/s and makes the wire thicker the more it carries. The estimate is worked out from the routes: channels, sample rate, bit depth, and unicast (4 channels per flow) or multicast (8 per flow), using Audinate's figure of about 6 Mb/s for a 4-channel, 48 kHz, 24-bit unicast flow. The bundle's click card and the device panel show it too.
+
 ## Monitor view
 
 **Monitor** (next to **Diagram** at the top left) is Dante Monitor, built in. It runs inside the diagram server and shares its port, its network and its picture of the devices. It only listens and reads: it pings devices, listens to the Dante clock and reads switches over SNMP, and never changes anything on them.
 
 - **Problems**: everything wrong right now, from the monitor's own checks (device offline, unstable ping, switch port down or erroring, slow link, IP conflict, mixed sample rates, clock trouble) and from the netaudio daemon's issues (clock sync, address conflicts, failed subscriptions and more). Click a device name to jump to it on the diagram.
 - **Devices** (ping, loss, IP, MAC, switch port), **Clock** (leader, sync timing, every device sending clock), **Switches** (every port's link, speed, load and errors), **History** (one timeline with CSV export) and **Setup** (switches, notifications).
+- **Switches** also shows the estimated Dante traffic through each port (worked out from the routes), and through the uplink when a switch has one. A port whose Dante traffic is at 70% of its link speed or more turns amber.
+- **Dropouts**: routed channels that had signal, went silent for 2 to 60 seconds, then came back, with the time and how long. An input that went silent while its source kept sending is marked **lost on the way**. Built from the level history, so it only fills while levels are on; kept until the app quits.
 - **Cables**: the physical view. Each switch with every Dante device above the port it's plugged into. A cable with no link is red, one with recent errors amber, a link under 1 Gb/s is labelled, and the busier the port the thicker the cable. Switches that see each other over LLDP are joined.
 - The **problem count** next to **Live** opens a slim sidebar over the diagram with the problems and the clock leader.
 - The diagram itself only gets two things from the monitor: **failed routes are drawn red** (hover for the reason), and devices with a **clock or IP problem get a badge** on their block.

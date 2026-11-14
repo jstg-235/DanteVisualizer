@@ -5,6 +5,9 @@
 // The diagram gets just three things from here, through onState: the problem count,
 // and clock and IP badges for its blocks (state.badges).
 
+import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
+import { fetchDropouts, clearDropouts, durText } from "./history.js";
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const sevLabel = { critical: "Problem", warning: "Warning", info: "Info", ok: "OK" };
@@ -123,29 +126,69 @@ function renderClock() {
 }
 
 const recentErr = (p) => p.last_error_ts && Date.now() / 1000 - p.last_error_ts < 300;
+const NEAR_CAPACITY = 0.7;    // estimated Dante traffic above this share of the link speed turns amber
+
+// Estimated Dante traffic through each port of a switch, worked out from the routes:
+// a device's port carries what it sends (into the switch) and what it receives (out of it).
+// The uplink carries every flow between this switch's devices and devices elsewhere; that's
+// only filled in when the switch has a single uplink, so it's clear which port it uses.
+function expectedByPort(s) {
+  const net = opts.getNetwork?.();
+  const out = new Map();
+  if (!net) return out;
+  const traffic = deviceTraffic(net.model, net.routes);
+  const here = new Set(mon.devices.filter((d) => d.port?.switch_id === s.id).map((d) => d.name));
+  for (const p of s.ports) {
+    if (p.device && traffic[p.device]) out.set(p.index, { in: traffic[p.device].out, out: traffic[p.device].in });
+  }
+  const uplinks = s.ports.filter((p) => p.uplink);
+  if (uplinks.length === 1 && here.size) {
+    const pairs = new Map();
+    for (const r of net.routes) {
+      if (r.failed || r.missing || here.has(r.srcDevice) === here.has(r.dstDevice)) continue;
+      const k = r.srcDevice + "\u0000" + r.dstDevice;
+      if (!pairs.has(k)) pairs.set(k, []);
+      pairs.get(k).push(r);
+    }
+    let up = 0, down = 0;
+    for (const rs of pairs.values()) {
+      const v = routesMbps(rs, net.model);
+      if (here.has(rs[0].srcDevice)) up += v; else down += v;
+    }
+    out.set(uplinks[0].index, { in: down, out: up });
+  }
+  return out;
+}
+const nearCap = (e, p) => e && p.speed_mbps && Math.max(e.in, e.out) >= p.speed_mbps * NEAR_CAPACITY;
 
 function renderSwitches() {
   const el = $("m-switches");
   if (!mon.switches.length) { el.innerHTML = `<div class="m-panel m-empty">No switches added yet. Add your Netgear or Luminex switches in Setup.</div>`; return; }
   el.innerHTML = mon.switches.map((s) => {
     const status = s.reachable === false ? `<span class="sev-text-critical">not answering</span>` : s.reachable ? `<span class="sev-text-ok">connected</span>` : `<span class="muted">connecting…</span>`;
+    const exp = expectedByPort(s);
     const ports = s.ports.map((p) => {
-      const cls = ["m-port", p.up ? "up" : "", recentErr(p) ? "err" : "", p.uplink ? "uplink" : "", p.up && p.speed_mbps && p.speed_mbps < 1000 ? "slow" : ""].join(" ");
+      const cls = ["m-port", p.up ? "up" : "", recentErr(p) ? "err" : "", p.uplink ? "uplink" : "", p.up && p.speed_mbps && p.speed_mbps < 1000 ? "slow" : "", nearCap(exp.get(p.index), p) ? "near" : ""].join(" ");
       const tot = Object.entries(p.errors_total).filter(([, v]) => v).map(([k, v]) => `${k.replace("_", " ")}: ${v}`).join(", ");
       const tip = `${p.name}${p.alias ? " (" + p.alias + ")" : ""}\n${p.up ? "Up at " + p.speed_mbps + " Mb/s" : "Down"}${p.in_mbps != null ? `\nIn ${p.in_mbps} / Out ${p.out_mbps} Mb/s` : ""}${p.mcast_pps != null ? `\nMulticast ${p.mcast_pps} pkt/s` : ""}${p.device ? "\nDante: " + p.device : ""}${p.lldp ? "\nNeighbour: " + p.lldp : ""}${tot ? "\nErrors since start: " + tot : ""}`;
       return `<div class="${cls}" title="${esc(tip)}"><b>${esc(p.name)}</b><div class="dev">${esc(p.device || (p.uplink ? "uplink" : p.alias))}</div></div>`;
     }).join("");
-    const busy = s.ports.filter((p) => p.up).sort((a, b) => (b.util_pct || 0) - (a.util_pct || 0)).slice(0, 12);
-    const rows = busy.map((p) => `<tr><td class="mono">${esc(p.name)}</td><td>${esc(p.device || p.alias || (p.uplink ? "uplink" : ""))}</td>
-      <td class="num">${p.speed_mbps}</td><td class="num">${p.in_mbps ?? "—"}</td><td class="num">${p.out_mbps ?? "—"}</td>
+    const load = (p) => Math.max(p.util_pct || 0, exp.get(p.index) && p.speed_mbps ? (100 * Math.max(exp.get(p.index).in, exp.get(p.index).out)) / p.speed_mbps : 0);
+    const busy = s.ports.filter((p) => p.up).sort((a, b) => load(b) - load(a)).slice(0, 12);
+    const rows = busy.map((p) => {
+      const e = exp.get(p.index);
+      const est = e ? `<td class="num ${nearCap(e, p) ? "sev-text-warning" : ""}">${mbpsText(e.in).replace(" Mb/s", "")} / ${mbpsText(e.out).replace(" Mb/s", "")}${nearCap(e, p) ? ` <span class="m-badge warn">near capacity</span>` : ""}</td>` : `<td class="num muted">—</td>`;
+      return `<tr><td class="mono">${esc(p.name)}</td><td>${esc(p.device || p.alias || (p.uplink ? "uplink" : ""))}</td>
+      <td class="num">${p.speed_mbps}</td>${est}<td class="num">${p.in_mbps ?? "—"}</td><td class="num">${p.out_mbps ?? "—"}</td>
       <td class="num ${p.util_pct >= 70 ? "sev-text-warning" : ""}">${p.util_pct ?? "—"}%</td><td class="num">${p.mcast_pps ?? "—"}</td>
-      <td class="num ${Object.values(p.errors_total).some((v) => v) ? "sev-text-critical" : ""}">${Object.values(p.errors_total).reduce((a, b) => a + b, 0)}</td></tr>`).join("");
+      <td class="num ${Object.values(p.errors_total).some((v) => v) ? "sev-text-critical" : ""}">${Object.values(p.errors_total).reduce((a, b) => a + b, 0)}</td></tr>`;
+    }).join("");
     return `<div class="m-panel m-gap">
       <div class="m-swhead"><span class="t">${esc(s.label)}</span><span class="muted">${esc(s.type_label)} · <span class="mono">${esc(s.ip)}</span></span><span>${status}</span><span class="muted m-right">${esc(s.sys?.descr || "")}</span></div>
       ${s.reachable === false ? `<p class="m-hint">${esc(s.error || "")}<br>${esc(s.setup)}</p>` : ""}
       <div class="m-ports">${ports}</div>
-      <div class="m-legend"><span class="l-up">up</span><span class="l-down">down</span><span class="l-err">errors (last 5 min)</span><span class="l-slow">below 1 Gb/s</span><span class="l-uplink">uplink</span></div>
-      ${rows ? `<div class="m-scroll"><table><thead><tr><th>Port</th><th>Connected to</th><th class="num">Speed</th><th class="num">In Mb/s</th><th class="num">Out Mb/s</th><th class="num">Busy</th><th class="num">Multicast/s</th><th class="num">Errors</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+      <div class="m-legend"><span class="l-up">up</span><span class="l-down">down</span><span class="l-err">errors (last 5 min)</span><span class="l-slow">below 1 Gb/s</span><span class="l-uplink">uplink</span><span class="l-near">Dante traffic near capacity</span></div>
+      ${rows ? `<div class="m-scroll"><table><thead><tr><th>Port</th><th>Connected to</th><th class="num">Speed</th><th class="num" title="Estimated from the routes: in to the switch / out of it">Dante est. in / out</th><th class="num">In Mb/s</th><th class="num">Out Mb/s</th><th class="num">Busy</th><th class="num">Multicast/s</th><th class="num">Errors</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
     </div>`;
   }).join("");
 }
@@ -237,6 +280,31 @@ function renderCables() {
   wireLinks(el);
 }
 
+// ---------- dropouts ----------
+let dropouts = null;
+async function refreshDropouts() {
+  try { dropouts = await fetchDropouts(); } catch { dropouts = { missing: true }; }
+  if (tab === "dropouts" && !$("monitor").hidden) renderDropouts();
+}
+function renderDropouts() {
+  const body = $("m-dropouts");
+  if (!dropouts) { body.innerHTML = `<tr><td colspan="4" class="m-empty">Loading…</td></tr>`; return; }
+  if (dropouts.missing) { body.innerHTML = `<tr><td colspan="4" class="m-empty">This server doesn't keep level history.</td></tr>`; return; }
+  const list = dropouts.dropouts || [];
+  $("m-drop-meta").textContent = dropouts.recording ? "Watching levels now" : "Not watching: levels are off or the diagram is offline";
+  const r = dropouts.rules || {};
+  $("m-drop-hint").textContent = `A dropout is a routed channel that had signal, went silent (below ${r.signalDb ?? -60} dBFS) for ${r.min ?? 2} to ${r.max ?? 60} seconds, then came back. ` +
+    "Longer silences are taken as intentional. \"Lost on the way\" means an input went silent while its source kept sending. The list is kept until the app quits.";
+  body.innerHTML = list.length ? list.map((d) => {
+    const ch = `${deviceLink(d.device)} ${d.side === "tx" ? "out" : "in"} ${d.ch}`;
+    const what = d.side === "tx" ? "The source went silent"
+      : d.sourceKeptSending ? `<span class="sev-text-warning">Lost on the way</span>: ${esc(d.source.device)} out ${d.source.ch ?? "?"} kept sending`
+      : `Input went silent <span class="muted">(from ${esc(d.source?.device)} out ${d.source?.ch ?? "?"})</span>`;
+    return `<tr><td class="time mono muted">${when(d.t)}</td><td class="num">${durText(d.seconds)}</td><td>${ch}</td><td>${what}</td></tr>`;
+  }).join("") : `<tr><td colspan="4" class="m-empty">No dropouts${dropouts.recording ? " so far" : ""}.</td></tr>`;
+  wireLinks(body);
+}
+
 function eventRow(e) {
   return `<tr><td class="time mono muted">${when(e.ts)}</td><td class="sev"><span class="m-dot sev-${e.severity}"></span>${sevLabel[e.severity] || e.severity}</td>
     <td><b>${esc(e.subject)}</b></td><td>${esc(e.message)}</td></tr>`;
@@ -302,7 +370,7 @@ function renderAll() {
   c.textContent = n;
   const visible = !$("monitor").hidden;
   if (visible) {
-    ({ overview: renderOverview, devices: renderDevices, clock: renderClock, switches: renderSwitches, cables: renderCables, history: renderHistory }[tab] || (() => {}))();
+    ({ overview: renderOverview, devices: renderDevices, clock: renderClock, switches: renderSwitches, cables: renderCables, history: renderHistory, dropouts: renderDropouts }[tab] || (() => {}))();
   }
   if (!$("m-side").hidden) renderSidebar();
 }
@@ -339,6 +407,7 @@ function showTab(t) {
   document.querySelectorAll("#m-nav button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tab === t)));
   document.querySelectorAll(".m-tab").forEach((s) => (s.hidden = s.id !== "m-tab-" + t));
   if (t === "setup") loadSetup();
+  if (t === "dropouts") refreshDropouts();
   renderAll();
 }
 
@@ -387,6 +456,8 @@ export function initMonitor(o) {
   refreshEvents();
   setInterval(refresh, 2000);
   setInterval(refreshEvents, 5000);
+  setInterval(() => { if (tab === "dropouts" && !$("monitor").hidden) refreshDropouts(); }, 3000);
+  $("m-drop-clear").onclick = async () => { await clearDropouts(); refreshDropouts(); };
 }
 
 export const monitorState = () => mon;

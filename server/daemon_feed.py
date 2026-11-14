@@ -31,6 +31,18 @@ def _channel_number(key, c):
     return None
 
 
+# Facts about a device that the device info panel shows. Only things that rarely change,
+# so the diagram isn't redrawn for them.
+INFO_FIELDS = {"mac_address": "mac", "product_version": "firmware", "software_version": "software",
+               "encoding": "encoding", "latency_ms": "latencyMs", "clock_role": "clockRole",
+               "network_redundancy": "redundancy", "tx_flow_count": "txFlows", "rx_flow_count": "rxFlows",
+               "model_id": "modelId"}
+
+
+def device_info(d):
+    return {k: d[src] for src, k in INFO_FIELDS.items() if d.get(src) not in (None, "", [], {})}
+
+
 def model_from_netaudio(devs):
     """Daemon devices ({server_name: device}) -> the app's model (same shape as a snapshot)."""
     devices = []
@@ -71,6 +83,7 @@ def model_from_netaudio(devs):
             "online": d.get("online", True) is not False,
             "ipv4": d.get("ipv4"),
             "canIdentify": d.get("identify_supported") is not False,
+            "info": device_info(d),
             "tx": sorted(tx, key=lambda c: c["id"]),
             "rx": sorted(rx, key=lambda c: c["id"]),
         })

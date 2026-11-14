@@ -1,5 +1,7 @@
 import { parsePresetXml, buildRoutes, rangeText } from "./model.js";
-import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered } from "./monitor.js";
+import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered, monitorState } from "./monitor.js";
+import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
+import { mountHistory, closeHistory } from "./history.js";
 
 // ---------- geometry ----------
 const W = 250;          // block width
@@ -25,6 +27,7 @@ const state = {
   levels: null,                           // { device: { tx: [dB|null], rx: [dB|null], age } }
   badges: {},                             // from the monitor: { device: [{ kind: "clock"|"ip", severity, text }] }
   view$: "diagram",                       // "diagram" | "monitor"
+  bandwidth: load("dv.bandwidth", false),  // show estimated Mb/s on the wires
 };
 
 // Elements that show signal, collected on each render and updated in place
@@ -190,16 +193,19 @@ function floorBetween(ns, x0, x1) {
 }
 
 // Put a bundle label on the path where it doesn't sit on top of another label.
-function placeLabel(path, placed) {
+// Labels are about 20 px tall and `w` wide, so two clash when they're closer than that.
+function placeLabel(path, placed, w = 60) {
   const len = path.getTotalLength();
-  for (const t of [0.5, 0.38, 0.62, 0.28, 0.72, 0.2, 0.8]) {
+  const clear = (p) => placed.every((q) => Math.abs(q.x - p.x) > (q.w + w) / 2 + 4 || Math.abs(q.y - p.y) > 24);
+  for (const t of [0.5, 0.38, 0.62, 0.28, 0.72, 0.2, 0.8, 0.12, 0.88]) {
     const p = path.getPointAtLength(len * t);
-    if (placed.every((q) => Math.hypot(q.x - p.x, q.y - p.y) > 34)) { placed.push(p); return p; }
+    if (clear(p)) { placed.push({ x: p.x, y: p.y, w }); return p; }
   }
   const p = path.getPointAtLength(len * 0.5);
-  placed.push(p);
+  placed.push({ x: p.x, y: p.y, w });
   return p;
 }
+const labelWidth = (text) => text.length * 7.2 + 16;
 
 function render() {
   if (!state.model) return;
@@ -259,23 +265,27 @@ function render() {
     const bothCollapsed = !state.expanded.has(g.srcNode.id) && !state.expanded.has(g.dstNode.id);
     if (bothCollapsed) {
       const a = portPos(g.srcNode, "tx"), b = portPos(g.dstNode, "rx");
-      const width = 2 + Math.log2(g.routes.length) * 1.6;
+      // With bandwidth on, the thickness follows the estimated Mb/s instead of the channel count.
+      const bw = state.bandwidth ? routesMbps(g.routes, state.model) : null;
+      const width = bw != null ? 1.5 + Math.log2(1 + bw) * 1.5 : 2 + Math.log2(g.routes.length) * 1.6;
       const laneY = isBackward(a, b) ? floorBetween(ns, a.x, b.x) + 40 + 26 * lane++ : null;
       const failed = g.routes.filter((r) => r.failed).length;
       const d = curve(a, b, laneY);
       const path = el("path", { d, class: "wire bundle" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : ""), stroke: color, "stroke-width": width }, wiresLayer);
       clickable(path, { kind: "bundle", key }, null, null, d, Math.max(12, width + 6));
-      const mid = placeLabel(path, placed);
+      const bwText = bw != null ? ` · ${mbpsText(bw)}` : "";
+      const mid = placeLabel(path, placed, labelWidth(`${g.routes.length}/${g.routes.length} live` + bwText + (failed ? ` · ${failed} failed` : "")));
       const label = el("g", { class: "bundle-label" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : ""), transform: `translate(${mid.x},${mid.y})` }, labelsLayer);
-      const text = `${g.routes.length} ch` + (failed ? ` · ${failed} failed` : "");
+      const text = `${g.routes.length} ch` + bwText + (failed ? ` · ${failed} failed` : "");
       el("rect", { x: -(text.length * 3.6 + 8), y: -10, width: text.length * 7.2 + 16, height: 20, rx: 10, stroke: color }, label);
       const t = el("text", { x: 0, y: 4, "text-anchor": "middle" }, label);
       t.textContent = text;
       clickable(label, { kind: "bundle", key });
-      live.bundles.push({ path, label, text: t, rect: label.firstChild, routes: g.routes, total: g.routes.length, failed });
+      live.bundles.push({ path, label, text: t, rect: label.firstChild, routes: g.routes, total: g.routes.length, failed, bwText });
     } else {
       const laneBase = floorBetween(ns, portPos(g.srcNode, "tx").x, portPos(g.dstNode, "rx").x) + 40 + 26 * lane;
       let usedLane = false;
+      const groupPaths = [];
       for (const r of g.routes) {
         const a = portPos(g.srcNode, "tx", r.srcChannel), b = portPos(g.dstNode, "rx", r.dstChannel);
         const back = isBackward(a, b);
@@ -286,8 +296,21 @@ function render() {
         const path = el("path", { d, class: "wire single" + (faded ? " dim" : "") + (isTraced(r) ? " traced" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : ""), stroke: color }, wiresLayer);
         clickable(path, { kind: "route", id: r.id }, null, null, d, 10);
         live.wires.push({ path, route: r });
+        groupPaths.push(path);
       }
       if (usedLane) lane++;
+      // Bandwidth on: one label per device pair, on the middle wire of the group.
+      if (state.bandwidth) {
+        const mid = groupPaths[Math.floor(groupPaths.length / 2)];
+        if (mid) {
+          const text = mbpsText(routesMbps(g.routes, state.model));
+          const p = placeLabel(mid, placed, labelWidth(text));
+          const label = el("g", { class: "bundle-label bw-label" + (dim ? " dim" : "") + (lit ? " traced" : ""), transform: `translate(${p.x},${p.y})` }, labelsLayer);
+          el("rect", { x: -(text.length * 3.6 + 8), y: -10, width: text.length * 7.2 + 16, height: 20, rx: 10, stroke: color }, label);
+          el("text", { x: 0, y: 4, "text-anchor": "middle" }, label).textContent = text;
+          clickable(label, { kind: "bundle", key });
+        }
+      }
     }
   }
 
@@ -410,7 +433,7 @@ function applyLevels() {
     }
     b.path.classList.toggle("live", on > 0);
     b.label.classList.toggle("live", on > 0);
-    const text = (known ? `${on}/${b.total} live` : `${b.total} ch`) + (b.failed ? ` · ${b.failed} failed` : "");
+    const text = (known ? `${on}/${b.total} live` : `${b.total} ch`) + (b.bwText || "") + (b.failed ? ` · ${b.failed} failed` : "");
     if (b.text.textContent !== text) {
       b.text.textContent = text;
       b.rect.setAttribute("x", -(text.length * 3.6 + 8));
@@ -452,14 +475,50 @@ function renderPanel(byId) {
     <p class="muted">${esc([d.manufacturer, d.model].filter(Boolean).join(" "))}${d.sampleRate ? ` · ${d.sampleRate / 1000} kHz` : ""} · ${d.rx.length} in / ${d.tx.length} out</p>
     ${(state.badges[d.name] || []).map((b) => `<p class="sev-text-${b.severity}"><b>${b.kind === "clock" ? "Clock problem" : "IP problem"}:</b> ${esc(b.text)}</p>`).join("")}
     ${state.routes.some((r) => r.dstDevice === d.name && r.failed) ? `<p class="sev-text-critical"><b>Failed routes:</b> in ${rangeText(state.routes.filter((r) => r.dstDevice === d.name && r.failed).map((r) => r.dstChannel))}</p>` : ""}
+    <dl class="dev-info"></dl>
     ${canIdentify(d) ? `<p><button class="identify" title="Blink this device's identify LED so you can find it in the rack">Identify</button> <span class="muted identify-msg"></span></p>` : ""}
     <h3>Receiving from</h3>
     <ul>${[...into].map(([o, rs]) => row(o, rs, "in")).join("") || '<li class="muted">Nothing</li>'}</ul>
     <h3>Sending to</h3>
     <ul>${[...outOf].map(([o, rs]) => row(o, rs, "out")).join("") || '<li class="muted">Nothing</li>'}</ul>`;
   panel.querySelector(".close").onclick = () => { state.selected = null; render(); };
+  fillDeviceInfo(d);
   const idBtn = panel.querySelector(".identify");
   if (idBtn) idBtn.onclick = () => identify(d.name, idBtn, panel.querySelector(".identify-msg"));
+}
+
+// ---------- device info ----------
+// What we know about the selected device, from the network itself (netaudio), the monitor
+// (ping, switch port, clock) and the routes (estimated bandwidth). Updated in place every
+// couple of seconds while the panel is open.
+function fillDeviceInfo(d) {
+  const box = panel.querySelector(".dev-info");
+  if (!box) return;
+  const info = d.info || {};
+  const m = monitorState()?.devices?.find((x) => x.name === d.name);
+  const rows = [];
+  const add = (k, v) => { if (v != null && v !== "") rows.push(`<dt>${k}</dt><dd>${v}</dd>`); };
+  const isLive = ["live", "offline"].includes(state.model?.source);
+  if (isLive) add("Status", d.online ? (m && !m.online ? `<span class="sev-text-warning">not answering ping</span>` : "Online") : `<span class="sev-text-critical">Offline</span>`);
+  add("IP", d.ipv4 || m?.ip ? `<span class="mono">${esc(d.ipv4 || m.ip)}</span>` : null);
+  add("MAC", info.mac || m?.mac ? `<span class="mono">${esc(info.mac || m.mac)}</span>` : null);
+  if (m?.port) add("Switch port", `${esc(m.port.where || `${m.port.switch} ${m.port.name}`)}${m.port.up ? (m.port.speed_mbps ? ` · ${m.port.speed_mbps < 1000 ? `<span class="sev-text-warning">${m.port.speed_mbps} Mb/s</span>` : `${m.port.speed_mbps / 1000} Gb/s`}` : "") : ` · <span class="sev-text-critical">no link</span>`}`);
+  if (m && m.rtt_ms != null) add("Ping", `${m.rtt_ms.toFixed(2)} ms${m.ping_loss ? ` · <span class="sev-text-warning">${m.ping_loss}% lost</span>` : ""}`);
+  add("Sample rate", d.sampleRate ? `${d.sampleRate / 1000} kHz` : null);
+  const enc = info.encoding != null ? String(info.encoding).replace(/^PCM\s*/i, "") : null;
+  add("Bit depth", enc ? `${esc(enc)}${/^\d+$/.test(enc) ? "-bit" : ""}` : null);
+  const lat = info.latencyMs != null ? +info.latencyMs : m?.latencies?.length ? m.latencies[0] / 1e6 : null;
+  add("Latency", lat != null && !isNaN(lat) ? `${lat} ms` : null);
+  const role = m?.is_leader ? "Leader" : info.clockRole;
+  add("Clock", role ? esc(String(role).replace(/^\w/, (c) => c.toUpperCase())) : null);
+  add("Firmware", info.firmware ? esc(info.firmware) : null);
+  add("Redundancy", info.redundancy != null ? (info.redundancy === true ? "Yes" : info.redundancy === false ? "No" : esc(info.redundancy)) : null);
+  if (info.txFlows != null || info.rxFlows != null) add("Flows", `${info.txFlows ?? "?"} out · ${info.rxFlows ?? "?"} in`);
+  add("Channels", `${d.tx.length} out · ${d.rx.length} in`);
+  const bw = deviceTraffic(state.model, state.routes)[d.name];
+  if (bw && (bw.out || bw.in)) add("Bandwidth", `${bw.out ? `sends ~${mbpsText(bw.out)}` : ""}${bw.out && bw.in ? " · " : ""}${bw.in ? `receives ~${mbpsText(bw.in)}` : ""} <span class="muted">(estimated)</span>`);
+  const html = rows.join("");
+  if (box.innerHTML !== html) box.innerHTML = html;
 }
 
 // ---------- identify ----------
@@ -569,9 +628,11 @@ function clearTrace() {
 const traceCard = { at: null };
 function updateTraceCard() {
   const ids = tracedRoutes();
+  if (state.view$ !== "diagram") { tooltip.hidden = true; closeHistory(); return; }
   if (!state.trace || (state.trace.kind !== "channel" && !ids?.size)) {
     if (state.trace) state.trace = null;    // the route went away
     tooltip.hidden = true;
+    closeHistory();
     return;
   }
   const rs = state.routes.filter((r) => ids.has(r.id));
@@ -580,11 +641,28 @@ function updateTraceCard() {
   if (t.kind === "route") html = routeText(rs[0]);
   else if (t.kind === "channel") html = channelText(t, rs);
   else html = bundleText(rs);
-  tooltip.innerHTML = `<button class="close" aria-label="Close">×</button>` + html;
+  const targets = historyTargets(t, rs);
+  tooltip.innerHTML = `<button class="close" aria-label="Close">×</button>` + html + (targets.length ? `<div class="hist-slot"></div>` : "");
   tooltip.classList.add("pinned");
   tooltip.hidden = false;
   tooltip.querySelector(".close").onclick = () => clearTrace();
+  if (targets.length) mountHistory(tooltip.querySelector(".hist-slot"), targets, () => traceCard.at && placeCard(traceCard.at));
+  else closeHistory();
   if (traceCard.at) placeCard(traceCard.at);
+}
+// Which channels' level history the click card shows: the clicked channel, or both ends of
+// a clicked wire. Only for the live network (or a frozen view of it): that's what's recorded.
+function historyTargets(t, rs) {
+  if (!["live", "offline"].includes(state.model?.source)) return [];
+  if (t.kind === "channel") return [{ device: t.device, side: t.side, ch: t.ch, label: t.side === "tx" ? "Sent" : "Received" }];
+  if (t.kind === "route" && rs[0]) {
+    const r = rs[0];
+    const out = [];
+    if (!r.missing && r.srcChannel != null) out.push({ device: r.srcDevice, side: "tx", ch: r.srcChannel, label: "Sent" });
+    out.push({ device: r.dstDevice, side: "rx", ch: r.dstChannel, label: "Received" });
+    return out;
+  }
+  return [];
 }
 function placeCard(at) {
   const r = svg.getBoundingClientRect();
@@ -615,7 +693,10 @@ function channelText(t, rs) {
 function bundleText(rs) {
   const max = 12;
   const lines = rs.slice(0, max).map((r) => `${r.srcChannel ?? "?"} ${esc(shorten(r.srcChannelName || "", 14))} → ${r.dstChannel} ${esc(shorten(r.dstChannelName || "", 14))}`);
+  const bw = rs.some((r) => !r.missing && !r.failed) ? routesMbps(rs, state.model) : 0;
+  const multi = rs.some((r) => /multicast/i.test(r.stateLabel || ""));
   return `<b>${esc(rs[0].srcDevice)}</b> → <b>${esc(rs[0].dstDevice)}</b> · ${rs.length} channel${rs.length > 1 ? "s" : ""}<br>` +
+    (bw ? `<span class="muted">About ${mbpsText(bw)} on the network (estimated${multi ? ", multicast" : ""})</span><br>` : "") +
     `<span class="muted">out ${rangeText(rs.map((r) => r.srcChannel).filter((x) => x != null))} → in ${rangeText(rs.map((r) => r.dstChannel))}</span><br>` +
     failedText(rs) + `<div class="trace-list">${lines.join("<br>")}${rs.length > max ? `<br><span class="muted">… and ${rs.length - max} more</span>` : ""}</div>`;
 }
@@ -734,6 +815,14 @@ $("mode-network").onclick = () => setMode("network");
 $("mode-flow").onclick = () => setMode("flow");
 $("btn-layout").onclick = () => { autoLayout(); render(); fit(); };
 $("btn-fit").onclick = fit;
+function setBandwidth(on) {
+  state.bandwidth = on;
+  save("dv.bandwidth", on);
+  $("btn-bw").setAttribute("aria-pressed", String(on));
+  render();
+}
+$("btn-bw").onclick = () => setBandwidth(!state.bandwidth);
+$("btn-bw").setAttribute("aria-pressed", String(state.bandwidth));
 // Label the button with what it will do next.
 function updateExpandButton() {
   if (!state.model) return;
@@ -745,6 +834,7 @@ document.addEventListener("keydown", (e) => {
   if (state.view$ !== "diagram") return;
   if (e.key === "Escape") clearTrace();
   if (e.key === "e" || e.key === "E") $("btn-expand").click();
+  if (e.key === "b" || e.key === "B") $("btn-bw").click();
 });
 $("btn-expand").onclick = () => {
   const ns = nodes();
@@ -1082,6 +1172,10 @@ $("btn-problems").onclick = () => {
 initMonitor({
   onState(mon) {
     updateProblems(mon);
+    if (state.selected && !panel.hidden) {
+      const n = nodes().find((x) => x.id === state.selected);
+      if (n) fillDeviceInfo(n.device);
+    }
     const badges = mon.badges || {};
     if (JSON.stringify(badges) !== JSON.stringify(state.badges)) {
       state.badges = badges;
@@ -1092,6 +1186,7 @@ initMonitor({
   hasDevice: (name) => !!state.model?.devices.some((d) => d.name === name),
   onOpenView: () => setView("monitor"),
   onSidebar: (open) => $("btn-problems").setAttribute("aria-pressed", String(open)),
+  getNetwork: () => (state.model ? { model: state.model, routes: state.routes } : null),
   onAvailable(yes) { if (!yes && state.view$ === "monitor") setView("diagram"); },
 });
 
