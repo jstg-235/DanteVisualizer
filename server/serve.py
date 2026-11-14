@@ -22,6 +22,10 @@ Data sources (pick one):
   --monitor-demo        A pretend network with staged problems, for the diagram and the Monitor
                         view together. Needs no other source.
 
+Level history: whatever levels are served are also recorded, one peak per channel per
+second for the last hour, at /api/history?device=&side=tx|rx&ch=&seconds=, and dropouts
+found in them at /api/dropouts (see level_history.py). In memory only.
+
 Never changes routes or settings. With --daemon, two things reach devices on request:
 POST /api/identify blinks one device's identify LED, and POST /api/metering asks devices
 to send levels (the same non-persistent request Dante Controller sends).
@@ -47,7 +51,8 @@ from pathlib import Path
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from daemon_feed import DaemonFeed  # noqa: E402
+from daemon_feed import DaemonFeed, device_info  # noqa: E402
+from level_history import LevelHistory  # noqa: E402
 
 
 def model_from_preset(path):
@@ -98,6 +103,7 @@ def model_from_snapshot(path):
             "sampleRate": d.get("sample_rate_hz"),
             "online": d.get("online", True),
             "ipv4": d.get("ipv4"),
+            "info": device_info(d),
             "tx": sorted(tx, key=lambda c: c["id"]),
             "rx": sorted(rx, key=lambda c: c["id"]),
         })
@@ -133,26 +139,46 @@ def levels_from_file(path):
 
 
 def demo_levels(model):
-    """Plausible moving levels: routed channels carry signal, a few sit silent."""
+    """Plausible moving levels: routed channels carry signal, a few sit silent.
+    Inputs follow their source, so the dropouts list shows the source's dropouts once,
+    plus the odd input that drops on its own ("lost on the way")."""
     now = time.time()
     used_tx = {}
     for d in model["devices"]:
         for c in d["rx"]:
             if c["subDevice"]:
                 used_tx.setdefault(c["subDevice"], set()).add(c["subChannel"])
+
+    def lvl(seed, active):
+        if not active or seed % 7 == 0:
+            return None
+        if seed % 11 == 3 and (now + seed) % 47 < 4:
+            return None      # a staged dropout, for the level history and dropouts list
+        v = -30 + 22 * math.sin(now * (0.7 + (seed % 5) * 0.3) + seed) + random.uniform(-3, 3)
+        if seed % 13 == 5:
+            v += 9           # a hot channel that clips now and then
+        return round(min(0.0, v), 1)
+
+    by_name = {d["name"]: d for d in model["devices"]}
+    hashes = {d["name"]: sum(map(ord, d["name"])) for d in model["devices"]}
     out = {}
     for d in model["devices"]:
-        def lvl(seed, active):
-            if not active or seed % 7 == 0:
-                return None
-            v = -30 + 22 * math.sin(now * (0.7 + (seed % 5) * 0.3) + seed) + random.uniform(-3, 3)
-            return round(min(0.0, v), 1)
         names = used_tx.get(d["name"], set())
-        h = sum(map(ord, d["name"]))
+        h = hashes[d["name"]]
+        rx = []
+        for c in d["rx"]:
+            src = by_name.get(c["subDevice"]) if c["subDevice"] else None
+            tx = next((t for t in src["tx"] if t["name"] == c["subChannel"] or str(t["id"]) == c["subChannel"]), None) if src else None
+            if tx is None or c.get("state") == "error":
+                rx.append(None)
+            elif (h + c["id"]) % 29 == 4 and (now + c["id"]) % 71 < 3:
+                rx.append(None)  # lost on the way: the source keeps sending
+            else:
+                rx.append(lvl(hashes[src["name"]] + tx["id"], True))
         out[d["name"]] = {
             "age": 0, "stale": False,
             "tx": [lvl(h + c["id"], c["name"] in names or str(c["id"]) in names) for c in d["tx"]],
-            "rx": [lvl(h + c["id"], bool(c["subDevice"])) for c in d["rx"]],
+            "rx": rx,
         }
     return {"t": now, "devices": out}
 
@@ -272,6 +298,62 @@ def main():
     if args.refresh_cmd:
         threading.Thread(target=refresher, args=(args.refresh_cmd, args.refresh), daemon=True).start()
 
+    def current_levels():
+        """Levels in the /api/levels shape, or None when there are none."""
+        if feed:
+            # The daemon's levels, plus the helper's file (--levels) for devices the daemon
+            # has none for: some (e.g. Fourier, Universal Audio) only announce signal presence
+            # in their heartbeats, which the daemon doesn't pass on.
+            lv = feed.levels()
+            if args.levels and feed.metering:
+                try:
+                    extra = levels_from_file(args.levels)["devices"]
+                except (OSError, ValueError):
+                    extra = {}
+                for name, d in extra.items():
+                    if lv is None:
+                        lv = {"t": time.time(), "devices": {}}
+                    cur = lv["devices"].get(name)
+                    if cur is None or (cur["stale"] and not d["stale"]):
+                        lv["devices"][name] = d
+            if lv is not None:
+                return lv
+        if args.levels:
+            try:
+                return levels_from_file(args.levels)
+            except (OSError, ValueError):
+                return None
+        if args.demo_levels:
+            model = source.get()
+            return demo_levels(model) if model else None
+        return None
+
+    route_cache = {"model": None, "routes": {}}
+
+    def current_routes():
+        """{(receiving device, rx channel): (sending device, tx channel or None)} for dropouts."""
+        model = source.get()
+        if model is None:
+            return route_cache["routes"]
+        if model is not route_cache["model"]:
+            by_name = {d["name"]: d for d in model["devices"]}
+            routes = {}
+            for d in model["devices"]:
+                for c in d["rx"]:
+                    if not c.get("subDevice"):
+                        continue
+                    src = by_name.get(c["subDevice"])
+                    tx = None
+                    if src:
+                        hit = next((t for t in src["tx"] if t["name"] == c["subChannel"]), None) or \
+                            next((t for t in src["tx"] if str(t["id"]) == str(c["subChannel"])), None)
+                        tx = hit["id"] if hit else None
+                    routes[(d["name"], c["id"])] = (c["subDevice"], tx)
+            route_cache.update(model=model, routes=routes)
+        return route_cache["routes"]
+
+    history = LevelHistory(current_levels, current_routes, log=lambda m: print(m, flush=True)).start()
+
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
             super().__init__(*a, directory=str(WEB), **kw)
@@ -307,9 +389,9 @@ def main():
             if path.startswith("/api/monitor/"):
                 res = monitor.post(path, body) if monitor else (503, {"error": "the monitor isn't running"})
                 return self.send_json(*(res or (404, {"error": "not found"})))
-            if not feed:
-                return self.send_json(503, {"error": "needs the netaudio daemon (--daemon)"})
             if path == "/api/identify":
+                if not feed:
+                    return self.send_json(503, {"error": "needs the netaudio daemon (--daemon)"})
                 if not feed.connected:
                     return self.send_json(503, {"error": "the netaudio daemon isn't connected"})
                 try:
@@ -317,6 +399,11 @@ def main():
                 except OSError as e:
                     return self.send_json(502, {"error": f"netaudio daemon: {e}"})
                 return self.send_json(status if status in (200, 400, 404, 409) else 502, data)
+            if path == "/api/dropouts/clear":
+                history.clear_dropouts()
+                return self.send_json(200, {"ok": True})
+            if not feed:
+                return self.send_json(503, {"error": "needs the netaudio daemon (--daemon)"})
             if path == "/api/metering":
                 feed.set_metering(bool(body.get("on")))
                 return self.send_json(200, {"metering": feed.metering})
@@ -351,33 +438,29 @@ def main():
                 wait = urllib.parse.parse_qs(query).get("wait", [None])[0]
                 if wait is not None and wait.isdigit():
                     feed.wait_for_change(int(wait), 25)
-            if path == "/api/levels" and feed:
-                # The daemon's levels, plus the helper's file (--levels) for devices the daemon
-                # has none for: some (e.g. Fourier, Universal Audio) only announce signal presence
-                # in their heartbeats, which the daemon doesn't pass on.
-                lv = feed.levels()
-                if args.levels and feed.metering:
-                    try:
-                        extra = levels_from_file(args.levels)["devices"]
-                    except (OSError, ValueError):
-                        extra = {}
-                    for name, d in extra.items():
-                        if lv is None:
-                            lv = {"t": time.time(), "devices": {}}
-                        cur = lv["devices"].get(name)
-                        if cur is None or (cur["stale"] and not d["stale"]):
-                            lv["devices"][name] = d
+            if path == "/api/levels":
+                lv = current_levels()
                 if lv is not None:
                     return self.send_json(200, lv)
-            if self.path.split("?")[0] == "/api/levels":
-                if args.levels:
+                if args.levels and not feed:
                     try:
-                        return self.send_json(200, levels_from_file(args.levels))
+                        levels_from_file(args.levels)
                     except (OSError, ValueError) as e:
                         return self.send_json(503, {"error": str(e)})
-                if args.demo_levels and source.get():
-                    return self.send_json(200, demo_levels(source.get()))
                 return self.send_json(404, {"error": "no levels feed"})
+            if path == "/api/history":
+                q = urllib.parse.parse_qs(query)
+                try:
+                    side = q.get("side", ["tx"])[0]
+                    ch = int(q.get("ch", ["0"])[0])
+                    seconds = int(q.get("seconds", ["600"])[0])
+                except ValueError:
+                    return self.send_json(400, {"error": "bad channel or seconds"})
+                if side not in ("tx", "rx"):
+                    return self.send_json(400, {"error": "side must be tx or rx"})
+                return self.send_json(200, history.series(q.get("device", [""])[0], side, ch, seconds))
+            if path == "/api/dropouts":
+                return self.send_json(200, history.dropout_list())
             if self.path.split("?")[0] == "/api/snapshot":
                 model = source.get()
                 if model is None:

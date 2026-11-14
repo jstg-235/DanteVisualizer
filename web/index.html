@@ -22,6 +22,7 @@
     <button id="btn-expand" class="diagram-only" title="Open or close every block's channel list (shortcut: E)">Expand all</button>
     <button id="btn-layout" class="diagram-only" title="Rearrange the blocks automatically">Auto layout</button>
     <button id="btn-fit" class="diagram-only" title="Zoom to fit">Fit</button>
+    <button id="btn-bw" class="diagram-only toggle" aria-pressed="false" title="Show the estimated bandwidth of each device-to-device flow on the wires (shortcut: B)">Bandwidth</button>
     <label class="file-btn diagram-only" title="Open a Dante Controller preset (.xml) or a saved setup (.json)">Open…<input id="file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
     <label class="file-btn diagram-only" title="Lay a preset (.xml) or a saved setup (.json) over the network on screen to see how it differs">Compare…<input id="cmp-file" type="file" accept=".xml,.json,application/xml,text/xml,application/json"></label>
     <button id="btn-save" class="diagram-only" title="Save this layout, opened channels, view and network to a file">Save setup</button>
@@ -66,6 +67,7 @@
           <button data-tab="clock">Clock</button>
           <button data-tab="switches">Switches</button>
           <button data-tab="cables">Cables</button>
+          <button data-tab="dropouts">Dropouts</button>
           <button data-tab="history">History</button>
           <button data-tab="setup">Setup</button>
         </div>
@@ -96,6 +98,14 @@
         </div>
         <div class="m-tab" id="m-tab-switches" hidden><div id="m-switches"></div></div>
         <div class="m-tab" id="m-tab-cables" hidden><div id="m-cables"></div></div>
+        <div class="m-tab" id="m-tab-dropouts" hidden>
+          <div class="m-toolbar">
+            <span id="m-drop-meta" class="muted"></span>
+            <button id="m-drop-clear">Clear list</button>
+          </div>
+          <div class="m-panel m-scroll"><table class="m-events"><thead><tr><th>When</th><th class="num">Silent for</th><th>Channel</th><th>What happened</th></tr></thead><tbody id="m-dropouts"></tbody></table></div>
+          <p class="m-hint" id="m-drop-hint"></p>
+        </div>
         <div class="m-tab" id="m-tab-history" hidden>
           <div class="m-toolbar">
             <select id="m-sev"><option value="">All events</option><option value="critical">Problems only</option><option value="warning">Warnings and problems</option></select>
@@ -131,7 +141,7 @@
     </section>
     <div id="tooltip" class="tooltip" hidden></div>
   </main>
-  <footer class="hint diagram-only">Drag blocks to arrange · click a block to show its channels · click a channel or wire to see where it goes (Esc clears) · E expands or collapses all · drag the background to pan · scroll to zoom</footer>
+  <footer class="hint diagram-only">Drag blocks to arrange · click a block to show its channels · click a channel or wire to see where it goes and its level history (Esc clears) · E expands or collapses all · drag the background to pan · scroll to zoom</footer>
   <script type="module" src="app.js"></script>
 </body>
 </html>
