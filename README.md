@@ -43,6 +43,15 @@ The app is read-only until you press **Edit** (next to **Live**, or Signal → E
 - **Change log.** Every change (time, network, before, after, and whether it worked) goes to `patch-log.jsonl` in the app's data folder.
 - Try it without devices: `python3 server/serve.py --monitor-demo --demo-levels`. In the demo, patching changes the pretend network only.
 
+## Solo
+
+**Solo** (top right) lets you listen to any channel on a monitor output, and works with Edit off. It can only ever change that monitor output's inputs.
+
+- **Choose the monitor output** once per network: click **Solo**, turn on **Edit**, pick the device and its left and right inputs (or **Mono** for one speaker), then **Save**. It's saved with the network (`solo.json` in the app's data folder).
+- **Solo** a channel from its click card: click an output, an input (solos its source) or a wire. A single channel plays on both sides (dual mono); **Solo pair** sends that channel and the next to left and right.
+- While soloing, the button turns teal and names the source. Solo something else to switch. **Unsolo** (in the Solo card or on any click card) puts back what the monitor output had before, except on an input someone re-patched meanwhile, which is left alone.
+- Solo changes go in the change log but not on the Undo list.
+
 ## Details on click
 
 Everything here opens on a click, never on hover, and only reads: nothing changes on the network.

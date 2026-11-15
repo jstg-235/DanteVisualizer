@@ -2,6 +2,7 @@ import { parsePresetXml, buildRoutes, rangeText } from "./model.js";
 import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered, monitorState } from "./monitor.js";
 import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
 import { mountHistory, closeHistory } from "./history.js";
+import { initSolo, mountSoloControls, refresh as refreshSolo } from "./solo.js";
 import { initEdit, edit, leaveEdit, mountPatchControls, refresh as refreshEdit } from "./edit.js";
 import { initCompare, ghostRoutes, liveMark, refreshCompare, compareLine, ghostText, hideComparePanel } from "./compare-ui.js";
 
@@ -747,8 +748,15 @@ function updateTraceCard() {
   const patchAt = !edit.on || state.model?.source !== "live" ? null
     : t.kind === "channel" && t.side === "rx" ? { device: t.device, ch: t.ch, route: rs[0] }
     : t.kind === "route" && rs[0] ? { device: rs[0].dstDevice, ch: rs[0].dstChannel, route: rs[0] } : null;
+  // Solo: the output to listen to, from a clicked output, an input (its source) or a wire.
+  const r0 = rs[0];
+  const soloSrc = state.model?.source !== "live" ? null
+    : t.kind === "channel" && t.side === "tx" ? { device: t.device, ch: t.ch }
+    : (t.kind === "channel" || t.kind === "route") && r0 && !r0.missing && r0.srcChannel != null ? { device: r0.srcDevice, ch: r0.srcChannel } : null;
   tooltip.innerHTML = `<button class="close" aria-label="Close">×</button>` + html +
+    (soloSrc ? `<div class="solo-slot"></div>` : "") +
     (patchAt ? `<div class="patch-slot"></div>` : "") + (targets.length ? `<div class="hist-slot"></div>` : "");
+  if (soloSrc) mountSoloControls(tooltip.querySelector(".solo-slot"), state.model, soloSrc);
   if (patchAt) mountPatchControls(tooltip.querySelector(".patch-slot"), state.model, patchAt.device, patchAt.ch, patchAt.route);
   tooltip.classList.add("pinned");
   tooltip.hidden = false;
@@ -1062,7 +1070,7 @@ function setModel(model, { keepLayout = false } = {}) {
   showStatus(`${{ live: "Live" + via, setup: "Saved setup", offline: "Offline" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
   render();
   if (first && !keepLayout) fit();
-  if (first) refreshEdit();
+  if (first) { refreshEdit(); refreshSolo(); }
 }
 
 let statusHold = 0;   // a patch result stays up a few seconds, over the routine "Live: …" line
@@ -1153,11 +1161,22 @@ function goLive() {
 
 $("btn-live").onclick = () => (live$.wanted ? goOffline() : goLive());
 
+initSolo({
+  model: () => state.model,
+  editOn: () => edit.on,
+  status: (text, error) => showStatus(text, error, 8000),
+  changed: () => {
+    render();
+    if (live$.wanted && state.model?.via !== "daemon") poll();
+  },
+});
+
 initEdit({
   canEdit: () => live$.wanted && state.model?.source === "live",
   status: (text, error) => showStatus(text, error, 8000),
   changed: () => {
     render();
+    refreshSolo();
     // With the daemon, the long poll brings the change the moment it lands; otherwise ask now.
     if (live$.wanted && state.model?.via !== "daemon") poll();
   },

@@ -29,7 +29,8 @@ found in them at /api/dropouts (see level_history.py). In memory only.
 Read-only unless Edit mode is on (see patching.py). With --daemon, these reach devices on request:
 POST /api/identify blinks one device's identify LED, POST /api/metering asks devices to send
 levels (the same non-persistent request Dante Controller sends), and, only in Edit mode,
-POST /api/patch and /api/patch/undo make or remove routes. GET/POST /api/edit reads or sets
+POST /api/patch and /api/patch/undo make or remove routes. Solo (POST /api/solo, /api/solo/off)
+works outside Edit mode but only ever patches the monitor output chosen in Edit mode (solo.py). GET/POST /api/edit reads or sets
 Edit mode. With --monitor-demo (no daemon), patching changes the pretend network only.
 The monitor only listens, pings devices and reads switches over SNMP (read-only).
 
@@ -56,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from daemon_feed import DaemonFeed, device_info  # noqa: E402
 from level_history import LevelHistory  # noqa: E402
 from patching import Patcher, PatchError  # noqa: E402
+from solo import Solo  # noqa: E402
 
 
 def model_from_preset(path):
@@ -357,10 +359,11 @@ def main():
         return route_cache["routes"]
 
     history = LevelHistory(current_levels, current_routes, log=lambda m: print(m, flush=True)).start()
+    data_dir = os.environ.get("DV_DATA") or (None if args.monitor_demo else args.monitor_data)
     patcher = Patcher(source.get, current_levels, feed=feed,
-                      demo=bool(args.monitor_demo and not feed),
-                      log_dir=os.environ.get("DV_DATA") or (None if args.monitor_demo else args.monitor_data),
+                      demo=bool(args.monitor_demo and not feed), log_dir=data_dir,
                       log=lambda m: print(m, flush=True))
+    solo = Solo(patcher, data_dir)
     source.overlay = patcher.apply_overlay
 
     class Handler(http.server.SimpleHTTPRequestHandler):
@@ -408,6 +411,17 @@ def main():
                 except OSError as e:
                     return self.send_json(502, {"error": f"netaudio daemon: {e}"})
                 return self.send_json(status if status in (200, 400, 404, 409) else 502, data)
+            if path in ("/api/solo", "/api/solo/off", "/api/solo/output"):
+                try:
+                    if path == "/api/solo":
+                        return self.send_json(200, solo.solo(body.get("sources")))
+                    if path == "/api/solo/off":
+                        return self.send_json(200, solo.unsolo())
+                    return self.send_json(200, solo.set_output(body))
+                except PatchError as e:
+                    return self.send_json(e.status, {**e.body, **solo.status()})
+                except OSError as e:
+                    return self.send_json(502, {"error": f"netaudio daemon: {e}", **solo.status()})
             if path in ("/api/edit", "/api/patch", "/api/patch/undo"):
                 try:
                     if path == "/api/edit":
@@ -444,6 +458,8 @@ def main():
                 })
             if path == "/api/edit":
                 return self.send_json(200, patcher.status())
+            if path == "/api/solo":
+                return self.send_json(200, solo.status())
             if path.startswith("/api/monitor/"):
                 res = monitor.get(path, urllib.parse.parse_qs(query)) if monitor else None
                 if res is None:
