@@ -302,9 +302,28 @@ def main():
     if args.monitor_data or args.monitor_demo:
         from monitor_api import MonitorService
         data = args.monitor_data or str(Path(__file__).resolve().parent.parent / "monitor-data")
+        # Started below, once it knows which network's history to write to.
         monitor = MonitorService(data, demo=args.monitor_demo, daemon_url=args.daemon,
-                                 log=lambda m: print(m, flush=True)).start()
+                                 log=lambda m: print(m, flush=True))
     source = Source(args, feed, monitor)
+    started = time.time()
+
+    # ---- workspaces: one per Dante network ----
+    data_dir = os.environ.get("DV_DATA") or (None if args.monitor_demo else args.monitor_data)
+    ws_dir = data_dir
+    if not ws_dir and monitor and monitor.world:
+        ws_dir = monitor.data_dir                     # the demo's own folder, started fresh
+        shutil.rmtree(os.path.join(ws_dir, "workspaces"), ignore_errors=True)
+    workspaces = Workspaces(ws_dir, log=lambda m: print(m, flush=True),
+                            leader=lambda: monitor.engine.leader if monitor else None)
+    source.workspaces = workspaces
+    if monitor:
+        # The port's workspace from last time, if known now; otherwise the monitor's first
+        # lines are carried over when the workspace is found (see switched below).
+        ws0 = workspaces.active(source.iface())
+        if ws0:
+            monitor.engine.use_history(workspaces.history_path(ws0["id"]))
+        monitor.start()
     if monitor and not args.monitor_demo:
         def follow():
             # Keep the monitor on the same Dante port as the diagram (Network menu or automatic).
@@ -373,32 +392,21 @@ def main():
         return route_cache["routes"]
 
     history = LevelHistory(current_levels, current_routes, log=lambda m: print(m, flush=True)).start()
-    data_dir = os.environ.get("DV_DATA") or (None if args.monitor_demo else args.monitor_data)
     patcher = Patcher(source.get, current_levels, feed=feed,
                       demo=bool(args.monitor_demo and not feed), log_dir=data_dir,
                       log=lambda m: print(m, flush=True))
     solo = Solo(patcher, data_dir)
     source.overlay = patcher.apply_overlay
 
-    # ---- workspaces: one per Dante network ----
-    ws_dir = data_dir
-    if not ws_dir and monitor and monitor.world:
-        ws_dir = monitor.data_dir                     # the demo's own folder, started fresh
-        shutil.rmtree(os.path.join(ws_dir, "workspaces"), ignore_errors=True)
-    workspaces = Workspaces(ws_dir, log=lambda m: print(m, flush=True))
-    source.workspaces = workspaces
-
     def carry_over(ws, legacy_name):
         """The very first workspace takes over what the app kept per port until now."""
         solo.migrate(legacy_name, Workspaces.network_key(ws["id"]))
         if monitor and not monitor.world:
-            old = os.path.join(monitor.data_dir, "history.sqlite")
-            new = workspaces.history_path(ws["id"])
-            if new and os.path.exists(old) and not os.path.exists(new):
-                try:
-                    shutil.copy2(old, new)
-                except OSError as e:
-                    print(f"workspaces: can't copy the monitor history: {e}", flush=True)
+            # The monitor's history so far becomes this network's, and it writes there from now.
+            try:
+                monitor.engine.use_history(workspaces.history_path(ws["id"]), take_over=True)
+            except Exception as e:
+                print(f"workspaces: can't carry over the monitor history: {e}", flush=True)
 
     def switched(old, new, iface):
         """Another workspace is active: its own monitor history; and when it replaces one
@@ -414,7 +422,8 @@ def main():
                 threading.Thread(target=monitor.reset, args=(path, f"Now on {ws.get('name', 'another network')}."),
                                  daemon=True, name="monitor-reset").start()
             else:
-                monitor.engine.use_history(path)
+                # Found after the monitor started: bring its first lines along.
+                monitor.engine.use_history(path, carry_since=started)
 
     workspaces.on_create.append(carry_over)
     workspaces.on_switch.append(switched)

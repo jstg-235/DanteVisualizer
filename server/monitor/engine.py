@@ -33,6 +33,28 @@ class EventLog:
             id INTEGER PRIMARY KEY, ts REAL, severity TEXT, category TEXT, subject TEXT, message TEXT)""")
         self.db.commit()
 
+    def move_to(self, path, take_over=False, carry_since=None):
+        """Write to another file from now on, with nothing lost in between: every writer goes
+        through this object and its lock. take_over: a new file starts as a copy of this one.
+        carry_since: events logged here since then are copied over too."""
+        with self.lock:
+            if path == self.path:
+                return
+            fresh = not os.path.exists(path)
+            new = sqlite3.connect(path, check_same_thread=False)
+            if take_over and fresh:
+                self.db.backup(new)
+            else:
+                new.execute("""CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY, ts REAL, severity TEXT, category TEXT, subject TEXT, message TEXT)""")
+                if carry_since is not None:
+                    rows = self.db.execute("SELECT ts, severity, category, subject, message FROM events "
+                                           "WHERE ts >= ? ORDER BY id", (carry_since,)).fetchall()
+                    new.executemany("INSERT INTO events (ts, severity, category, subject, message) VALUES (?,?,?,?,?)", rows)
+            new.commit()
+            old, self.db, self.path = self.db, new, path
+            old.close()
+
     def add(self, severity, category, subject, message, ts=None):
         with self.lock:
             self.db.execute("INSERT INTO events (ts, severity, category, subject, message) VALUES (?,?,?,?,?)",
@@ -158,12 +180,10 @@ class Engine:
         self._start_listeners()
         self.log("info", "monitor", "Dante Monitor", "Listening on the Dante network port %s." % ip)
 
-    def use_history(self, path):
-        """Log to another history file (each network keeps its own)."""
-        if not path or path == getattr(self.events, "path", None):
-            return
-        # The old file is left open: a thread may still be writing its last line to it.
-        self.events = EventLog(path)
+    def use_history(self, path, take_over=False, carry_since=None):
+        """Log to another history file (each network keeps its own). See EventLog.move_to."""
+        if path:
+            self.events.move_to(path, take_over=take_over, carry_since=carry_since)
 
     def reset(self, history_path=None, note=None):
         """Forget every device, problem and clock reading, and listen afresh: the network on
