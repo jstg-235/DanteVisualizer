@@ -26,9 +26,11 @@ Level history: whatever levels are served are also recorded, one peak per channe
 second for the last hour, at /api/history?device=&side=tx|rx&ch=&seconds=, and dropouts
 found in them at /api/dropouts (see level_history.py). In memory only.
 
-Never changes routes or settings. With --daemon, two things reach devices on request:
-POST /api/identify blinks one device's identify LED, and POST /api/metering asks devices
-to send levels (the same non-persistent request Dante Controller sends).
+Read-only unless Edit mode is on (see patching.py). With --daemon, these reach devices on request:
+POST /api/identify blinks one device's identify LED, POST /api/metering asks devices to send
+levels (the same non-persistent request Dante Controller sends), and, only in Edit mode,
+POST /api/patch and /api/patch/undo make or remove routes. GET/POST /api/edit reads or sets
+Edit mode. With --monitor-demo (no daemon), patching changes the pretend network only.
 The monitor only listens, pings devices and reads switches over SNMP (read-only).
 
   python3 server/serve.py --preset "samples/HY4 Network preset.xml"
@@ -53,6 +55,7 @@ WEB = Path(__file__).resolve().parent.parent / "web"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from daemon_feed import DaemonFeed, device_info  # noqa: E402
 from level_history import LevelHistory  # noqa: E402
+from patching import Patcher, PatchError  # noqa: E402
 
 
 def model_from_preset(path):
@@ -192,6 +195,7 @@ class Source:
         self.model = None
         self.mtime = None
         self.error = None
+        self.overlay = lambda m: m   # demo patching draws its changes over the demo network
 
     def interface(self):
         """The Dante network port in use: the app's choice, else the one the probe found."""
@@ -215,7 +219,7 @@ class Source:
 
     def get(self):
         if self.monitor and self.monitor.world and not (self.feed or self.args.preset or self.args.snapshot):
-            return self.monitor.demo_model()
+            return self.overlay(self.monitor.demo_model())
         if self.feed:
             model, version = self.feed.snapshot()
             if model is not None:
@@ -353,6 +357,11 @@ def main():
         return route_cache["routes"]
 
     history = LevelHistory(current_levels, current_routes, log=lambda m: print(m, flush=True)).start()
+    patcher = Patcher(source.get, current_levels, feed=feed,
+                      demo=bool(args.monitor_demo and not feed),
+                      log_dir=os.environ.get("DV_DATA") or (None if args.monitor_demo else args.monitor_data),
+                      log=lambda m: print(m, flush=True))
+    source.overlay = patcher.apply_overlay
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -399,6 +408,20 @@ def main():
                 except OSError as e:
                     return self.send_json(502, {"error": f"netaudio daemon: {e}"})
                 return self.send_json(status if status in (200, 400, 404, 409) else 502, data)
+            if path in ("/api/edit", "/api/patch", "/api/patch/undo"):
+                try:
+                    if path == "/api/edit":
+                        return self.send_json(200, patcher.set_edit(bool(body.get("on"))))
+                    if path == "/api/patch":
+                        res = patcher.apply(body.get("changes"), confirmed=body.get("confirmed") is True,
+                                            label=str(body.get("label") or "")[:200] or None)
+                    else:
+                        res = patcher.undo()
+                    return self.send_json(200, {**res, "edit": patcher.status()})
+                except PatchError as e:
+                    return self.send_json(e.status, {**e.body, "edit": patcher.status()})
+                except OSError as e:
+                    return self.send_json(502, {"error": f"netaudio daemon: {e}", "edit": patcher.status()})
             if path == "/api/dropouts/clear":
                 history.clear_dropouts()
                 return self.send_json(200, {"ok": True})
@@ -417,7 +440,10 @@ def main():
                     "metering": bool(feed and feed.metering),
                     "canIdentify": bool(feed and feed.connected),
                     "monitor": bool(monitor),
+                    "edit": patcher.status(),
                 })
+            if path == "/api/edit":
+                return self.send_json(200, patcher.status())
             if path.startswith("/api/monitor/"):
                 res = monitor.get(path, urllib.parse.parse_qs(query)) if monitor else None
                 if res is None:

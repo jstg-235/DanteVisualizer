@@ -432,3 +432,41 @@ text.ghost-label { fill: var(--cmp-only); font-style: italic; }
 .bundle-label.cmp-differs rect { stroke: var(--cmp-diff) !important; stroke-width: 2; }
 .bundle-label.cmp-liveOnly rect { stroke: var(--cmp-extra) !important; stroke-width: 2; }
 @media (max-width: 640px) { .cmp-summary { width: 100%; margin-right: 0; } }
+
+/* ---------- Edit mode (patching) ---------- */
+.edit-btn { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; font-size: 12px; letter-spacing: .04em; min-width: 72px; justify-content: center; }
+.edit-btn .edit-icon { font-size: 13px; line-height: 1; }
+.edit-btn.on { background: #d97706; border-color: #d97706; color: #fff; font-variant-numeric: tabular-nums; }
+.edit-btn:disabled { opacity: .5; cursor: default; }
+.edit-btn:disabled:hover { border-color: var(--border); }
+.undo-btn:disabled { opacity: .5; cursor: default; }
+body.editing main::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 5;
+  box-shadow: inset 0 0 0 3px #d97706;
+}
+.edit-banner {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 6; pointer-events: none;
+  background: #d97706; color: #fff; font-size: 11.5px; font-weight: 650; letter-spacing: .05em;
+  padding: 4px 12px; border-radius: 999px; box-shadow: var(--shadow); white-space: nowrap; max-width: calc(100% - 32px);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.patch-slot { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #d97706; }
+.patch-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
+.patch-row select { font: inherit; max-width: 240px; }
+.patch-row .patch-un { font-size: 12px; padding: 3px 9px; border-color: #d97706; }
+.confirm {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text);
+  box-shadow: var(--shadow); padding: 18px 20px; width: min(680px, calc(100vw - 32px));
+}
+.confirm::backdrop { background: rgba(15, 18, 24, .45); }
+.confirm h2 { font-size: 15px; margin: 0 0 4px; }
+.confirm p { margin: 0 0 10px; font-size: 13px; }
+.confirm-table { max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.confirm table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.confirm th { text-align: left; font-weight: 600; color: var(--muted); background: var(--bg); position: sticky; top: 0; }
+.confirm th, .confirm td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.confirm tr.sig td { background: color-mix(in srgb, #dc2626 9%, transparent); }
+.confirm .sig-tag { color: #dc2626; font-weight: 650; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+.confirm #confirm-ok { background: #d97706; border-color: #d97706; }

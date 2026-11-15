@@ -141,7 +141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         ])
         meteringItem = item("Live Signal Levels", #selector(toggleMetering), "m", [.command, .shift])
         meteringItem.state = meteringPref ? .on : .off
-        menu("Signal", [item("Live or Offline", #selector(toggleLive), "l", [.command, .shift]), .separator(), meteringItem])
+        menu("Signal", [item("Live or Offline", #selector(toggleLive), "l", [.command, .shift]),
+                        item("Edit Mode (Allow Patching)", #selector(toggleEdit), "e", [.command, .shift]),
+                        .separator(), meteringItem])
         // Network: pick the port the Dante devices are on. Rebuilt each time it opens.
         let networkItem = NSMenuItem(title: "Network", action: nil, keyEquivalent: "")
         networkMenu = NSMenu(title: "Network")
@@ -219,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     @objc func showLogs() { NSWorkspace.shared.activateFileViewerSelecting([engine.logsDir]) }
     @objc func toggleLive() { click("btn-live") }
+    @objc func toggleEdit() { click("btn-edit") }
     @objc func toggleMetering() {
         meteringPref = !engine.meteringOn
         engine.setMetering(meteringPref)
