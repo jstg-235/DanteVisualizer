@@ -470,3 +470,31 @@ body.editing main::after {
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 .confirm #confirm-ok { background: #d97706; border-color: #d97706; }
+
+/* ---------- Solo ---------- */
+.solo-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; max-width: 280px; }
+.solo-btn .solo-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.solo-btn.on { background: #0d9488; border-color: #0d9488; color: #fff; font-weight: 600; }
+.solo-pop {
+  position: absolute; top: 10px; right: 16px; z-index: 8; width: min(340px, calc(100% - 32px));
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 12px 14px; font-size: 13px;
+}
+.solo-pop h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 6px; }
+.solo-pop h3:first-of-type { margin-top: 0; }
+.solo-pop p { margin: 0 0 8px; }
+.solo-pop .close { position: absolute; right: 6px; top: 6px; border: none; background: none; font-size: 16px; color: var(--muted); padding: 2px 6px; }
+.solo-pop .solo-off { border-color: #0d9488; }
+.solo-form { display: grid; gap: 8px; }
+.solo-form label { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.solo-form select { font: inherit; max-width: 210px; flex: 1; }
+.solo-slot { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #0d9488; }
+.solo-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.solo-row button { font-size: 12px; padding: 3px 9px; }
+.solo-row .solo-one { border-color: #0d9488; }
+.solo-slot p { margin: 4px 0 0; font-size: 12px; }
+
+/* The right-hand cluster stays on one line; the status text gives way first. */
+.bar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 260px; justify-content: flex-end; }
+.bar-right > button { flex: none; }
+.bar-right .status { margin-left: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
