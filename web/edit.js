@@ -92,11 +92,12 @@ export function leaveEdit() { if (edit.on) setEdit(false); }
 // ---------- patching ----------
 const endText = (e) => e ? `${esc(e.device)} out ${e.channel ?? "?"}${e.name && String(e.name) !== String(e.channel) ? ` <span class="muted">${esc(e.name)}</span>` : ""}` : `<span class="muted">nothing</span>`;
 
-export async function patch(changes, label) {
+// review: always show the confirm card first (a cascade), even when nothing needs it.
+export async function patch(changes, label, { review = false } = {}) {
   if (!edit.on || busy) return null;
   busy = true;
   try {
-    let { status, data } = await post("api/patch", { changes, label });
+    let { status, data } = await post("api/patch", { changes, label, review });
     if (status === 409 && data.needsConfirm) {
       const ok = await confirmCard(data.changes, label);
       if (!ok) { hooks.status("Nothing changed"); return null; }
@@ -150,7 +151,7 @@ function confirmCard(items, label) {
     const warn = [];
     if (live) warn.push(`<b class="sev-text-critical">${live} input${live > 1 ? "s are" : " is"} carrying signal now</b>`);
     if (removes) warn.push(`${removes} unpatch${removes > 1 ? "es" : ""}`);
-    if (replaces) warn.push(`${replaces} replace${replaces > 1 ? "" : "s"} an existing patch`);
+    if (replaces) warn.push(replaces > 1 ? `${replaces} replace existing patches` : "1 replaces an existing patch");
     const rows = items.slice(0, 200).map((i) =>
       `<tr class="${i.signal ? "sig" : ""}"><td><b>${esc(i.rxDevice)}</b> in ${i.rxChannel} <span class="muted">${esc(i.rxName)}</span></td>` +
       `<td>${endText(i.before)}</td><td>→</td><td>${endText(i.after)}</td>` +

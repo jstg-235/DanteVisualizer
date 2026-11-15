@@ -147,6 +147,16 @@
     <div id="tooltip" class="tooltip" hidden></div>
     <div id="solo-pop" class="solo-pop" hidden></div>
     <div id="edit-banner" class="edit-banner" hidden><span id="edit-banner-text">EDITING</span></div>
+    <div id="edit-hint" class="edit-hint" hidden></div>
+    <dialog id="cascade" class="confirm cascade" aria-label="Cascade a patch">
+      <form id="cascade-form">
+        <h2 id="cascade-title">Cascade</h2>
+        <label class="cascade-row">Patch the next <input id="cascade-n" type="number" min="1" step="1" value="7" inputmode="numeric"> inputs <span id="cascade-max" class="muted"></span></label>
+        <p id="cascade-preview" class="muted"></p>
+        <p class="muted">You'll see every change before anything is sent.</p>
+        <div class="confirm-actions"><button type="button" id="cascade-cancel">Cancel</button><button type="submit" id="cascade-ok">Next</button></div>
+      </form>
+    </dialog>
     <dialog id="confirm" class="confirm" aria-label="Confirm changes">
       <div id="confirm-body"></div>
       <div class="confirm-actions"><button id="confirm-cancel">Cancel</button><button id="confirm-ok" class="primary">Apply</button></div>
