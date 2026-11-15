@@ -28,6 +28,8 @@
     <button id="btn-save" class="diagram-only" title="Save this layout, opened channels, view and network to a file">Save setup</button>
     <span id="status" class="status"></span>
     <button id="btn-problems" class="problems-btn ok" hidden title="Open the monitor sidebar"><span class="pdot" aria-hidden="true"></span><span class="plabel">All good</span></button>
+    <button id="btn-undo" class="undo-btn" hidden disabled title="Nothing to undo">Undo</button>
+    <button id="btn-edit" class="edit-btn" hidden aria-pressed="false" title="Read-only. Click to allow patching on the live network."><span class="edit-icon" aria-hidden="true">✎</span><span class="edit-label">Edit</span></button>
     <button id="btn-live" class="live-btn wait" aria-pressed="true" title="Connecting to the live network"><span class="live-dot" aria-hidden="true"></span><span class="live-label">Connecting…</span></button>
   </header>
   <div id="cmp-bar" class="cmp-bar diagram-only" hidden>
@@ -140,6 +142,11 @@
       </div>
     </section>
     <div id="tooltip" class="tooltip" hidden></div>
+    <div id="edit-banner" class="edit-banner" hidden><span id="edit-banner-text">EDITING</span></div>
+    <dialog id="confirm" class="confirm" aria-label="Confirm changes">
+      <div id="confirm-body"></div>
+      <div class="confirm-actions"><button id="confirm-cancel">Cancel</button><button id="confirm-ok" class="primary">Apply</button></div>
+    </dialog>
   </main>
   <footer class="hint diagram-only">Drag blocks to arrange · click a block to show its channels · click a channel or wire to see where it goes and its level history (Esc clears) · E expands or collapses all · drag the background to pan · scroll to zoom</footer>
   <script type="module" src="app.js"></script>

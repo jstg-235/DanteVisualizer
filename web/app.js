@@ -2,6 +2,7 @@ import { parsePresetXml, buildRoutes, rangeText } from "./model.js";
 import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered, monitorState } from "./monitor.js";
 import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
 import { mountHistory, closeHistory } from "./history.js";
+import { initEdit, edit, leaveEdit, mountPatchControls, refresh as refreshEdit } from "./edit.js";
 import { initCompare, ghostRoutes, liveMark, refreshCompare, compareLine, ghostText, hideComparePanel } from "./compare-ui.js";
 
 // ---------- geometry ----------
@@ -742,7 +743,13 @@ function updateTraceCard() {
   else if (t.kind === "channel") html = channelText(t, rs);
   else html = bundleText(rs);
   const targets = historyTargets(t, rs);
-  tooltip.innerHTML = `<button class="close" aria-label="Close">×</button>` + html + (targets.length ? `<div class="hist-slot"></div>` : "");
+  // In Edit mode, an input (or a single wire, for its input) gets patch controls.
+  const patchAt = !edit.on || state.model?.source !== "live" ? null
+    : t.kind === "channel" && t.side === "rx" ? { device: t.device, ch: t.ch, route: rs[0] }
+    : t.kind === "route" && rs[0] ? { device: rs[0].dstDevice, ch: rs[0].dstChannel, route: rs[0] } : null;
+  tooltip.innerHTML = `<button class="close" aria-label="Close">×</button>` + html +
+    (patchAt ? `<div class="patch-slot"></div>` : "") + (targets.length ? `<div class="hist-slot"></div>` : "");
+  if (patchAt) mountPatchControls(tooltip.querySelector(".patch-slot"), state.model, patchAt.device, patchAt.ch, patchAt.route);
   tooltip.classList.add("pinned");
   tooltip.hidden = false;
   tooltip.querySelector(".close").onclick = () => clearTrace();
@@ -1048,15 +1055,20 @@ function setModel(model, { keepLayout = false } = {}) {
     state.expanded = new Set(saved?.expanded || []);
   }
   document.body.classList.add("loaded");
+  if (model.source !== "live") leaveEdit();   // patching is for the live network only
   refreshCompare();
   const missing = state.routes.filter((r) => r.missing).length;
   const via = model.via === "daemon" ? " (instant updates)" : "";
   showStatus(`${{ live: "Live" + via, setup: "Saved setup", offline: "Offline" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
   render();
   if (first && !keepLayout) fit();
+  if (first) refreshEdit();
 }
 
-function showStatus(text, error = false) {
+let statusHold = 0;   // a patch result stays up a few seconds, over the routine "Live: …" line
+function showStatus(text, error = false, hold = 0) {
+  if (!hold && Date.now() < statusHold) return;
+  statusHold = hold ? Date.now() + hold : 0;
   const s = $("status");
   s.textContent = text;
   s.classList.toggle("error", error);
@@ -1116,6 +1128,7 @@ function tellApp(on) {
 function goOffline() {
   if (!live$.wanted) return;
   live$.wanted = false;
+  leaveEdit();
   stopPolling();
   stopLevels();
   state.levels = null;
@@ -1139,6 +1152,16 @@ function goLive() {
 }
 
 $("btn-live").onclick = () => (live$.wanted ? goOffline() : goLive());
+
+initEdit({
+  canEdit: () => live$.wanted && state.model?.source === "live",
+  status: (text, error) => showStatus(text, error, 8000),
+  changed: () => {
+    render();
+    // With the daemon, the long poll brings the change the moment it lands; otherwise ask now.
+    if (live$.wanted && state.model?.via !== "daemon") poll();
+  },
+});
 setInterval(updateLiveButton, 5000);
 
 let pollTimer = null;

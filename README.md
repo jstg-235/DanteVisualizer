@@ -13,7 +13,7 @@ A whole-network, signal-flow view of a Dante audio network, as an alternative to
 | 5 | Instant updates from the netaudio daemon, Identify button | Done |
 | 6 | Monitor view (Dante Monitor folded in): problems, devices, clock, switches, cables, history | Done |
 
-The app never changes routes or settings. The only requests it sends to devices are metering start/stop (the same non-persistent request Dante Controller sends) and identify, when you press **Identify**.
+The app is read-only unless you turn on **Edit** (see Patching below). Otherwise the only requests it sends to devices are metering start/stop (the same non-persistent request Dante Controller sends) and identify, when you press **Identify**. It never changes device settings.
 
 ## Mac app
 
@@ -29,6 +29,19 @@ The app never changes routes or settings. The only requests it sends to devices 
 - **Network** menu: **Automatic** (the default) finds the port the Dante devices are on. On a Mac with several networks, pick the port yourself; the choice is remembered. Switching stops metering on the old network first. The window title shows the port in use.
 - Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
 - It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
+
+## Patching (Edit mode)
+
+The app is read-only until you press **Edit** (next to **Live**, or Signal → Edit Mode, ⇧⌘E). Edit mode is held by the server, which refuses every patch while it's off, so a stray click or a second window can't change anything.
+
+- **Only on the live network**, through the netaudio daemon. Edit is hidden for presets and saved setups and greyed out while offline.
+- **You can see it's on.** The button turns amber and counts down, an amber border runs round the diagram, and a banner names the network.
+- **It turns itself off** after 5 minutes with no patching, when the network changes, when the daemon disconnects, when you go offline and when the app restarts.
+- **Patching.** In Edit mode, click an input (or a wire) and its card gets **Patch from** (every output on the network) and **Unpatch**. A new patch on an empty input goes straight through.
+- **Confirm before anything that can hurt.** Unpatching, replacing a patch, or more than one change at once opens a confirm card listing each input with what it has now and what it will have, with inputs carrying signal flagged red. Nothing is sent until you press Apply.
+- **Undo** (or ⌘Z) puts back what was there, one change or group at a time, as long as nobody changed that input since.
+- **Change log.** Every change (time, network, before, after, and whether it worked) goes to `patch-log.jsonl` in the app's data folder.
+- Try it without devices: `python3 server/serve.py --monitor-demo --demo-levels`. In the demo, patching changes the pretend network only.
 
 ## Details on click
 
