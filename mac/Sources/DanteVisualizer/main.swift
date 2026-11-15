@@ -122,6 +122,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             item("Open Preset or Setup…", #selector(openFile), "o"),
             item("Save Setup…", #selector(saveSetup), "s"),
             .separator(),
+            item("New Workspace…", #selector(newWorkspace), "n", [.command, .shift]),
+            item("Clear Workspace…", #selector(clearWorkspace)),
+            item("Workspaces…", #selector(listWorkspaces)),
+            .separator(),
             item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
         ])
         menu("Edit", [
@@ -177,7 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         var names = Set<String>()
         for i in NetInterface.all() {
             names.insert(i.name)
-            let item = NSMenuItem(title: i.menuTitle, action: #selector(pickNetwork(_:)), keyEquivalent: "")
+            // Name the network each port was last on, so two networks on two ports are easy to tell apart.
+            let ws = engine.workspaceName(for: i.name).map { "  ·  \($0)" } ?? ""
+            let item = NSMenuItem(title: i.menuTitle + ws, action: #selector(pickNetwork(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = i.name
             item.state = chosen == i.name ? .on : .off
@@ -211,6 +217,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     @objc func openFile() { click("file") }
     @objc func saveSetup() { click("btn-save") }
+    @objc func newWorkspace() { click("ws-menu-new") }
+    @objc func clearWorkspace() { click("ws-menu-clear") }
+    @objc func listWorkspaces() { click("ws-menu-list") }
     @objc func viewNetwork() { click("mode-network") }
     @objc func viewFlow() { click("mode-flow") }
     @objc func toggleAll() { click("btn-expand") }

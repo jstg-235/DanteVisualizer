@@ -48,6 +48,7 @@ import threading
 import time
 import random
 import math
+import shutil
 import signal
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -59,6 +60,7 @@ from daemon_feed import DaemonFeed, device_info  # noqa: E402
 from level_history import LevelHistory  # noqa: E402
 from patching import Patcher, PatchError  # noqa: E402
 from solo import Solo  # noqa: E402
+from workspaces import Workspaces  # noqa: E402
 
 
 def model_from_preset(path):
@@ -199,6 +201,7 @@ class Source:
         self.mtime = None
         self.error = None
         self.overlay = lambda m: m   # demo patching draws its changes over the demo network
+        self.workspaces = None       # set in main: names the live network after its workspace
 
     def interface(self):
         """The Dante network port in use: the app's choice, else the one the probe found."""
@@ -221,6 +224,16 @@ class Source:
         return "Live network" + (f" ({iface})" if iface else "")
 
     def get(self):
+        model = self._get()
+        if self.workspaces and model and model.get("source") == "live":
+            model = self.workspaces.observe(model, self.iface())
+        return model
+
+    def iface(self):
+        """The port the workspace is chosen for (None in the demo)."""
+        return None if (self.monitor and self.monitor.world) else self.interface()
+
+    def _get(self):
         if self.monitor and self.monitor.world and not (self.feed or self.args.preset or self.args.snapshot):
             return self.overlay(self.monitor.demo_model())
         if self.feed:
@@ -367,6 +380,111 @@ def main():
     solo = Solo(patcher, data_dir)
     source.overlay = patcher.apply_overlay
 
+    # ---- workspaces: one per Dante network ----
+    ws_dir = data_dir
+    if not ws_dir and monitor and monitor.world:
+        ws_dir = monitor.data_dir                     # the demo's own folder, started fresh
+        shutil.rmtree(os.path.join(ws_dir, "workspaces"), ignore_errors=True)
+    workspaces = Workspaces(ws_dir, log=lambda m: print(m, flush=True))
+    source.workspaces = workspaces
+
+    def carry_over(ws, legacy_name):
+        """The very first workspace takes over what the app kept per port until now."""
+        solo.migrate(legacy_name, Workspaces.network_key(ws["id"]))
+        if monitor and not monitor.world:
+            old = os.path.join(monitor.data_dir, "history.sqlite")
+            new = workspaces.history_path(ws["id"])
+            if new and os.path.exists(old) and not os.path.exists(new):
+                try:
+                    shutil.copy2(old, new)
+                except OSError as e:
+                    print(f"workspaces: can't copy the monitor history: {e}", flush=True)
+
+    def switched(old, new, iface):
+        """Another workspace is active: its own monitor history; and when it replaces one
+        (a different network on the cable) a fresh start for the monitor and levels."""
+        ws = workspaces.data["workspaces"].get(new) or {}
+        with patcher.lock:
+            patcher.undo_stack.clear()
+        if old:
+            history.reset()
+        if monitor:
+            path = workspaces.history_path(new)
+            if old:
+                threading.Thread(target=monitor.reset, args=(path, f"Now on {ws.get('name', 'another network')}."),
+                                 daemon=True, name="monitor-reset").start()
+            else:
+                monitor.engine.use_history(path)
+
+    workspaces.on_create.append(carry_over)
+    workspaces.on_switch.append(switched)
+
+    def ws_post(path, body):
+        """The /api/workspace/... actions. Returns (status, body)."""
+        iface = source.iface()
+        try:
+            if path == "/api/workspace/switch":
+                out = {}
+                if not body.get("id") and not body.get("new"):
+                    return 400, {"error": "say which workspace, or new"}
+                if body.get("id") and body["id"] not in workspaces.data["workspaces"]:
+                    return 404, {"error": "no such workspace"}
+                # Unsolo first, while still on the network being left. Inputs that are gone
+                # (the cable has already moved) are reported, and the switch goes ahead.
+                if solo.status().get("active"):
+                    try:
+                        r = solo.unsolo()
+                        out["unsolo"] = {"applied": len(r.get("applied") or []), "failed": r.get("failed") or []}
+                    except Exception as e:
+                        out["unsolo"] = {"error": getattr(e, "body", {}).get("error") or str(e)}
+                if patcher.on:
+                    patcher.set_edit(False)
+                _old, ws = workspaces.switch(iface, ws_id=body.get("id") or None,
+                                             new_name=str(body.get("name") or "") or None)
+                return 200, {**out, "ok": True, "workspace": {"id": ws["id"], "name": ws["name"]},
+                             **workspaces.status(iface)}
+            if path == "/api/workspace/keep":
+                workspaces.keep(iface)
+                return 200, workspaces.status(iface)
+            if path == "/api/workspace/add":
+                workspaces.add_seen(iface)
+                return 200, workspaces.status(iface)
+            if path == "/api/workspace/clear":
+                ws = workspaces.clear(iface)
+                history.reset()
+                if monitor:
+                    threading.Thread(target=monitor.reset, daemon=True, name="monitor-reset",
+                                     args=(workspaces.history_path(ws["id"]),
+                                           f"Workspace cleared: started again from the {len(ws['devices'])} devices online.")).start()
+                return 200, {"ok": True, **workspaces.status(iface)}
+            if path == "/api/workspace/forget":
+                name = str(body.get("device") or "")
+                workspaces.forget(iface, name)
+                if monitor:
+                    monitor.forget(name)
+                return 200, {"ok": True, **workspaces.status(iface)}
+            if path == "/api/workspace/rename":
+                workspaces.rename(str(body.get("id") or ""), body.get("name"))
+                return 200, workspaces.status(iface)
+            if path == "/api/workspace/delete":
+                workspaces.delete(str(body.get("id") or ""))
+                return 200, workspaces.status(iface)
+            if path == "/api/workspace/layout":
+                layout = body.get("layout")
+                if not isinstance(layout, dict):
+                    return 400, {"error": "layout must be an object"}
+                workspaces.set_layout(str(body.get("id") or ""), layout)
+                return 200, {"ok": True}
+        except LookupError as e:
+            return 404, {"error": str(e).strip("'")}
+        except ValueError as e:
+            return 409, {"error": str(e)}
+        except PatchError as e:
+            return e.status, e.body
+        except OSError as e:
+            return 500, {"error": str(e)}
+        return 404, {"error": "not found"}
+
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
             super().__init__(*a, directory=str(WEB), **kw)
@@ -402,6 +520,8 @@ def main():
             if path.startswith("/api/monitor/"):
                 res = monitor.post(path, body) if monitor else (503, {"error": "the monitor isn't running"})
                 return self.send_json(*(res or (404, {"error": "not found"})))
+            if path.startswith("/api/workspace/"):
+                return self.send_json(*ws_post(path, body))
             if path == "/api/identify":
                 if not feed:
                     return self.send_json(503, {"error": "needs the netaudio daemon (--daemon)"})
@@ -463,6 +583,20 @@ def main():
                 })
             if path == "/api/edit":
                 return self.send_json(200, patcher.status())
+            if path == "/api/workspace":
+                source.get()           # judge the network as it is now
+                st = workspaces.status(source.iface())
+                st["demo"] = bool(monitor and monitor.world)
+                st["demoNetwork"] = monitor.world.network if monitor and monitor.world else None
+                return self.send_json(200, st)
+            if path in ("/api/workspace/layout", "/api/workspace/export"):
+                ws_id = urllib.parse.parse_qs(query).get("id", [""])[0]
+                if path.endswith("layout"):
+                    return self.send_json(200, {"layout": workspaces.get_layout(ws_id)})
+                try:
+                    return self.send_json(200, workspaces.export(ws_id))
+                except LookupError:
+                    return self.send_json(404, {"error": "no such workspace"})
             if path == "/api/solo":
                 return self.send_json(200, solo.status())
             if path.startswith("/api/monitor/"):

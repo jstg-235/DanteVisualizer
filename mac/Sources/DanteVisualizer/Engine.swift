@@ -76,6 +76,16 @@ final class Engine {
 
     /// Switch to another network port: stop everything (devices get "stop metering"),
     /// forget the old network's snapshot and levels, and start again on the new port.
+    /// The workspace (Dante network) last active on a port, from the server's workspaces/index.json.
+    func workspaceName(for iface: String) -> String? {
+        let url = dataDir.appendingPathComponent("workspaces/index.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let active = obj["active"] as? [String: Any], let id = active[iface] as? String,
+              let all = obj["workspaces"] as? [String: Any], let ws = all[id] as? [String: Any] else { return nil }
+        return ws["name"] as? String
+    }
+
     func switchInterface(to name: String?, metering: Bool) {
         interfaceOverride = name
         stop {

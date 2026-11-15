@@ -27,6 +27,7 @@ PING_EVERY = 5
 class EventLog:
     def __init__(self, path):
         self.lock = threading.Lock()
+        self.path = path
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("""CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY, ts REAL, severity TEXT, category TEXT, subject TEXT, message TEXT)""")
@@ -97,6 +98,7 @@ class Engine:
         self.running = False
         self.follow_ip = None    # the port Dante Visualizer is using (see follow_interface)
         self.auto_ip = None
+        self.forgotten = {}      # device key -> when it was forgotten (ignored until heard again)
 
     # --------------------------------------------------------------- control
     def start(self):
@@ -155,6 +157,52 @@ class Engine:
         time.sleep(1.2)
         self._start_listeners()
         self.log("info", "monitor", "Dante Monitor", "Listening on the Dante network port %s." % ip)
+
+    def use_history(self, path):
+        """Log to another history file (each network keeps its own)."""
+        if not path or path == getattr(self.events, "path", None):
+            return
+        # The old file is left open: a thread may still be writing its last line to it.
+        self.events = EventLog(path)
+
+    def reset(self, history_path=None, note=None):
+        """Forget every device, problem and clock reading, and listen afresh: the network on
+        the cable is a different one now (or the person asked to start again). The switch
+        list and settings stay."""
+        with self.lock:
+            if history_path:
+                self.use_history(history_path)
+            self.known.clear()
+            self.pings.clear()
+            self.issues = {}
+            self.leader = None
+            self.last_missed = {}
+            self.forgotten = {}
+            self.state = None
+            if self.demo:
+                self.demo.fresh_listeners()
+                self.discovery, self.ptp = self.demo.discovery, self.demo.ptp
+        if not self.demo and self.running:
+            # The mDNS listener remembers every device it has heard; a new one starts empty.
+            for x in (self.discovery, self.ptp):
+                if x:
+                    try:
+                        x.stop()
+                    except Exception:
+                        pass
+            time.sleep(1.2)
+            self._start_listeners()
+        if note:
+            self.log("info", "monitor", "Workspace", note)
+
+    def forget(self, name):
+        """Stop tracking a device that has left this network for good."""
+        key = (name or "").lower()
+        with self.lock:
+            self.known.pop(key, None)
+            self.pings.pop(key, None)
+            self.forgotten[key] = time.time()
+        self.log("info", "device", name, "Forgotten: no longer expected on this network.")
 
     def stop(self):
         self.running = False
@@ -264,6 +312,10 @@ class Engine:
         with self.lock:
             # --- remember devices so we notice them disappearing
             for key, d in found.items():
+                if key in self.forgotten:
+                    if d.get("last_seen", 0) <= self.forgotten[key]:
+                        continue            # forgotten, and not heard from since
+                    self.forgotten.pop(key)
                 if key not in self.known:
                     self.log("info", "device", d["name"], "Found %s %s at %s." %
                              (d.get("manufacturer") or "", d.get("model") or "device", d.get("ip") or "unknown IP"))

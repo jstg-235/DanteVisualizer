@@ -88,6 +88,7 @@ class MonitorService:
                 pass
         else:
             import_old_app(data_dir)
+        self.data_dir = data_dir
         self.engine = Engine(data_dir, demo=self.world)
         if self.world and not self.engine.config.data["switches"]:
             self.engine.config.data["switches"] = self.world.default_switches()
@@ -112,6 +113,16 @@ class MonitorService:
         if ips:
             ips.sort(key=lambda ip: not ip.startswith("169.254."))   # Dante's own addressing first
             self.engine.follow_interface(ips[0])
+
+    # ------------------------------------------------------------ workspaces
+    def reset(self, history_path=None, note=None):
+        """A different network (or a fresh start on this one): forget what was seen."""
+        with self.lock:
+            self.na_issues = {}
+        self.engine.reset(history_path, note)
+
+    def forget(self, name):
+        self.engine.forget(name)
 
     # ------------------------------------------------------------ netaudio issues
     def _issues_loop(self):
@@ -209,6 +220,9 @@ class MonitorService:
     def demo_model(self):
         """The monitor's demo devices as a diagram model, with routes and one failed route."""
         from monitor.demo import DEVICES
+        world = self.world
+        if world and world.network == "B":
+            return self._demo_model_b()
         rx_count = {"FOH-Console": 72, "Monitor-Console": 72, "Amp-Rack-L": 4, "Amp-Rack-R": 4,
                     "Record-Mac": 64, "Playback-Mac": 2, "Stagebox-A": 16, "Stagebox-B": 16, "Wireless-Rx": 0}
         routes = {}   # (dst, rx channel) -> (src, tx channel, state, label)
@@ -230,7 +244,6 @@ class MonitorService:
         patch("FOH-Console", 1, "Record-Mac", 1, 64, label="Subscribed (multicast)")
         patch("Monitor-Console", 1, "Stagebox-A", 1, 16)
         patch("Monitor-Console", 17, "Stagebox-B", 1, 16)
-        world = self.world
         devices = []
         for name, mf, model, ip, mac, ntx, _sw, _port in DEVICES:
             rx = []
@@ -248,8 +261,51 @@ class MonitorService:
                 "tx": [{"id": c, "name": f"{c:02d}"} for c in range(1, ntx + 1)],
                 "rx": rx,
             })
+        return self._demo_wrap(devices)
+
+    def _demo_wrap(self, devices):
+        # Devices from the network the pretend cable came from stay listed, offline, the way
+        # the daemon can keep a device that left without saying goodbye.
+        here = {d["name"] for d in devices}
+        for name, mf, model, ip, mac, ntx, _sw, _port in (self.world.lingering if self.world else []):
+            if name not in here:
+                devices.append({"name": name, "model": model, "manufacturer": mf, "ipv4": ip,
+                                "info": {"mac": mac}, "sampleRate": 48000, "online": False,
+                                "tx": [{"id": c, "name": f"{c:02d}"} for c in range(1, ntx + 1)], "rx": []})
+        devices.sort(key=lambda d: d["name"].lower())
         return {"source": "live", "name": "Demo network",
                 "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "devices": devices}
+
+    def _demo_model_b(self):
+        """The second pretend network: a small studio."""
+        from monitor.demo import DEVICES_B
+        rx_count = {"Studio-Desk": 32, "Stagebox-C": 8, "Edit-Mac": 32, "Speaker-Amp": 4}
+        routes = {}
+
+        def patch(src, src_from, dst, dst_from, n):
+            for k in range(n):
+                routes[(dst, dst_from + k)] = (src, str(src_from + k))
+
+        patch("Stagebox-C", 1, "Studio-Desk", 1, 16)
+        patch("Edit-Mac", 1, "Studio-Desk", 17, 8)
+        patch("Studio-Desk", 1, "Edit-Mac", 1, 32)
+        patch("Studio-Desk", 1, "Speaker-Amp", 1, 4)
+        patch("Studio-Desk", 5, "Stagebox-C", 1, 8)
+        devices = []
+        for name, mf, model, ip, mac, ntx, _sw, _port in DEVICES_B:
+            rx = []
+            for c in range(1, rx_count.get(name, 0) + 1):
+                r = routes.get((name, c))
+                rx.append({"id": c, "name": f"{c:02d}", "subDevice": r[0] if r else "", "subChannel": r[1] if r else "",
+                           "state": "connected" if r else None, "stateLabel": "Subscribed (unicast)" if r else None})
+            devices.append({
+                "name": name, "model": model, "manufacturer": mf, "ipv4": ip,
+                "info": {"mac": mac, "encoding": 24, "latencyMs": 1.0, "firmware": "4.2.1.3",
+                         "clockRole": "Leader" if name == "Studio-Desk" else "Follower"},
+                "sampleRate": 48000, "online": True,
+                "tx": [{"id": c, "name": f"{c:02d}"} for c in range(1, ntx + 1)], "rx": rx,
+            })
+        return self._demo_wrap(devices)
 
     # ------------------------------------------------------------ HTTP
     def get(self, path, query):
@@ -271,6 +327,7 @@ class MonitorService:
                 "switches": e.config.data["switches"],
                 "notifications": bool(e.config.data.get("notifications", False)),
                 "demo": bool(e.demo),
+                "demoNetwork": self.world.network if self.world else None,
             }, None
         if path == "/api/monitor/events.csv":
             buf = io.StringIO()
@@ -308,6 +365,11 @@ class MonitorService:
         if path == "/api/monitor/switches/remove":
             e.remove_switch(b.get("id"))
             return 200, {"ok": True}
+        if path == "/api/monitor/demo/network":
+            if not self.world:
+                return 404, {"error": "only in the demo"}
+            self.world.move_to("B" if self.world.network == "A" else "A")
+            return 200, {"ok": True, "network": self.world.network}
         if path == "/api/monitor/events/clear":
             e.events.clear()
             return 200, {"ok": True}

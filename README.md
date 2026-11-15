@@ -30,6 +30,20 @@ The app is read-only unless you turn on **Edit** (see Patching below). Otherwise
 - Menus: ⌘O open a preset or setup, ⌘S save setup, ⌘1/⌘2 views, ⌘E expand or collapse all, ⌘L auto layout, ⌘0 fit.
 - It's arm64 only (netaudio's native core is arm64) and ad-hoc signed, so other Macs will show a Gatekeeper warning until it's signed with a Developer ID.
 
+## Switching networks (workspaces)
+
+Each Dante network gets its own **workspace**: the devices it has, its layout and colours, its solo monitor output and its own monitor history. The app recognises the network from its devices (names and MAC addresses), not from the port, so two networks on the same port (HY4 and HY2 on the USB adapter, say) no longer mix.
+
+- **The workspace button** (next to **Live**) names the network you're on and how many of its devices are online. Click it to rename it, see what's missing, clear it, start a new one, switch to or delete another, or export one to a file.
+- **It asks before switching.** Once the device list has held still for 15 seconds, a blue bar under the toolbar says what it found: "This looks like HY2 (13 of its 14 devices are here)" with **Switch**, **Keep** and **New workspace**, or "A new network" with a name to start one. It never switches by itself. **Keep** stops it asking until the devices change again.
+- **Same network, devices missing:** if at least 60% of the network's devices are there, it's the same network, and the missing ones stay on the diagram as offline (they're really missing). One or two new devices are added to the workspace by themselves; more than that and the bar asks.
+- **Switching** unsolos first (while the monitor output can still be reached; if it can't, the solo is kept on record so you can unsolo when you're back), turns Edit off, empties the undo list, starts the monitor and the level history afresh, and moves to the new workspace's own history. Devices from the old network drop off the diagram.
+- **Clear workspace** (in the workspace card, or File → Clear Workspace…) starts again from what's online now: it forgets the devices it expected, the monitor's problems and the levels. The layout and the solo output stay.
+- **Forget device**: an offline device's info panel, and the Missing list in the workspace card, can forget a device that has left the network for good.
+- **Two networks on two ports:** pick the port in the **Network** menu. Each port remembers its own workspace, and the menu shows the network each port was last on.
+- The first time, the workspace for the port in use takes over its old layout, solo monitor output and monitor history.
+- Workspaces live in `~/Library/Application Support/Dante Visualizer/data/workspaces/` (never in this repository). Try it without devices: in the demo, the workspace card has **Move the cable to the other network**.
+
 ## Patching (Edit mode)
 
 The app is read-only until you press **Edit** (next to **Live**, or Signal → Edit Mode, ⇧⌘E). Edit mode is held by the server, which refuses every patch while it's off, so a stray click or a second window can't change anything.

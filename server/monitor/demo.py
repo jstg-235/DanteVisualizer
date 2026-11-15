@@ -24,6 +24,14 @@ DEVICES = [
     ("Playback-Mac", "Audinate", "Dante Virtual Soundcard", "169.254.10.8", "00:1d:c1:10:00:08", 16, "netgear", 3),
     ("Monitor-Console", "Yamaha", "QL5", "169.254.10.9", "00:1d:c1:10:00:09", 64, "netgear", 4),
 ]
+# A second pretend network (a small studio) on the same switch, for trying network switching.
+DEVICES_B = [
+    ("Studio-Desk", "Yamaha", "DM7", "169.254.20.1", "00:1d:c1:20:00:01", 32, "netgear", 5),
+    ("Stagebox-C", "Yamaha", "Tio1608-D2", "169.254.20.2", "00:1d:c1:20:00:02", 16, "netgear", 6),
+    ("Edit-Mac", "Audinate", "DVS", "169.254.20.3", "00:1d:c1:20:00:03", 32, "netgear", 7),
+    ("Speaker-Amp", "Powersoft", "Quattrocanali", "169.254.20.4", "00:0e:dd:20:00:04", 0, "netgear", 8),
+]
+NETWORKS = {"A": (DEVICES, "FOH-Console"), "B": (DEVICES_B, "Studio-Desk")}
 UPLINK = {"netgear": 25, "luminex": 9}
 
 
@@ -56,7 +64,7 @@ class FakeSwitch:
     def _link_up(self, i):
         if i == UPLINK[self.which]:
             return True
-        for d in DEVICES:
+        for d in self.world.devices:
             if d[6] == self.which and d[7] == i:
                 return d[0] != self.world.offline
         return False
@@ -84,7 +92,7 @@ class FakeSwitch:
         elif base == "1.3.6.1.2.1.17.1.4.1.2":
             out = {"%s.%d" % (base, i): i for i in range(1, self.nports + 1)}
         elif base == "1.3.6.1.2.1.17.7.1.2.2.1.2":
-            for d in DEVICES:
+            for d in self.world.devices:
                 if d[0] == self.world.offline:
                     continue
                 port = d[7] if d[6] == self.which else UPLINK[self.which]
@@ -106,12 +114,35 @@ class DemoWorld:
         self.slow_port = 3           # Wireless-Rx negotiates at 100 Mb/s
         self.rate_odd = None         # device at a different sample rate
         self.leaders = ["FOH-Console"]
+        self.network = "A"           # which pretend network is "on the cable"
+        self.lingering = []          # the other network's devices, as a daemon might keep them
         self.seq = {}
         self.switches = {"netgear": FakeSwitch(self, "netgear", 30, "FOH M4250", "NETGEAR M4250-26G4F-PoE+"),
                          "luminex": FakeSwitch(self, "luminex", 16, "Stage GigaCore", "Luminex GigaCore 16t")}
         threading.Thread(target=self._mdns_loop, daemon=True).start()
         threading.Thread(target=self._ptp_loop, daemon=True).start()
         threading.Thread(target=self._scenario_loop, daemon=True).start()
+
+    @property
+    def devices(self):
+        return NETWORKS[self.network][0]
+
+    def move_to(self, network):
+        """Pretend the cable now goes to the other network. Its devices stop answering, but
+        stay in the listeners' memory, as they would on a real network."""
+        if network not in NETWORKS or network == self.network:
+            return
+        self.lingering = list(self.devices)
+        self.network = network
+        self.offline = None
+        self.rate_odd = None
+        self.scenario_port = None
+        self.leaders = [NETWORKS[network][1]]
+
+    def fresh_listeners(self):
+        self.discovery = DanteDiscovery()
+        self.ptp = PtpMonitor()
+        self.ptp.listening = True
 
     def default_switches(self):
         return [{"id": "demo-ng", "name": "FOH M4250", "ip": "169.254.0.2", "type": "netgear_m4250", "community": ""},
@@ -121,10 +152,10 @@ class DemoWorld:
         return self.switches["luminex" if sw["type"] == "luminex_gigacore" else "netgear"]
 
     def arp_table(self):
-        return {d[3]: d[4] for d in DEVICES}
+        return {d[3]: d[4] for d in self.devices}
 
     def ping(self, ip):
-        d = next((d for d in DEVICES if d[3] == ip), None)
+        d = next((d for d in self.devices if d[3] == ip), None)
         if not d or d[0] == self.offline:
             time.sleep(0.2)
             return None
@@ -135,7 +166,7 @@ class DemoWorld:
     def _mdns_loop(self):
         while True:
             recs = []
-            for name, mf, model, ip, mac, nch, _sw, _p in DEVICES:
+            for name, mf, model, ip, mac, nch, _sw, _p in self.devices:
                 if name == self.offline:
                     continue
                 host = name.lower() + ".local"
@@ -155,21 +186,24 @@ class DemoWorld:
             time.sleep(5)
 
     def _ptp_loop(self):
-        followers = [d for d in DEVICES]
         while True:
             now = time.time()
-            for leader in self.leaders:
-                d = next(x for x in DEVICES if x[0] == leader)
+            followers = list(self.devices)
+            leaders = [x for x in self.leaders if any(f[0] == x for f in followers)] or [NETWORKS[self.network][1]]
+            for leader in leaders:
+                d = next((x for x in followers if x[0] == leader), None)
+                if not d:
+                    continue
                 seq = self.seq.get(leader, 0) + 1
                 if random.random() < 0.003:
                     seq += 1  # an occasional lost sync
                 self.seq[leader] = seq
                 self.ptp.ingest({"version": 1, "kind": "sync", "source": d[4], "seq": seq & 0xFFFF,
-                                 "grandmaster": d[4], "gm_stratum": 2 if leader == "FOH-Console" else 4,
-                                 "gm_identifier": "DFLT", "gm_preferred": leader == "FOH-Console",
+                                 "grandmaster": d[4], "gm_stratum": 2 if leader in ("FOH-Console", "Studio-Desk") else 4,
+                                 "gm_identifier": "DFLT", "gm_preferred": leader in ("FOH-Console", "Studio-Desk"),
                                  "sync_interval": -2}, d[3], now + random.uniform(0, 0.0015))
             f = random.choice(followers)
-            if f[0] not in self.leaders and f[0] != self.offline:
+            if f[0] not in leaders and f[0] != self.offline:
                 self.ptp.ingest({"version": 1, "kind": "delay_req", "source": f[4], "seq": 0}, f[3], now)
             time.sleep(0.25)
 
@@ -180,6 +214,9 @@ class DemoWorld:
         while True:
             scene = scenes[i % len(scenes)]
             i += 1
+            if self.network != "A":      # the staged problems are on the first network
+                time.sleep(30)
+                continue
             if scene == "cable":
                 self.scenario_port = ("luminex", 2)       # Stagebox-B's cable goes bad
                 time.sleep(35)

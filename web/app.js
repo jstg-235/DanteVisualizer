@@ -5,6 +5,7 @@ import { mountHistory, closeHistory } from "./history.js";
 import { initSolo, mountSoloControls, refresh as refreshSolo } from "./solo.js";
 import { initEdit, edit, editing, leaveEdit, setEdit, mountPatchControls, refresh as refreshEdit, patch } from "./edit.js";
 import { initDraft, draft, onModel as draftOnModel, isDrafted, planPush, clearDraft } from "./draft.js";
+import { initWorkspace, refresh as refreshWorkspace, forgetDevice } from "./workspace.js";
 import { initCompare, ghostRoutes, liveMark, refreshCompare, compareLine, ghostText, hideComparePanel } from "./compare-ui.js";
 
 // ---------- geometry ----------
@@ -53,7 +54,9 @@ function load(key, fallback) {
 function save(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
 }
-const layoutKey = () => `dv.layout.${state.model?.name || "net"}`;
+// Live: per workspace (one per Dante network). Presets and setups: per name, as before.
+const layoutKey = (m = state.model) => m?.workspace ? `dv.layout.ws.${m.workspace.id}` : `dv.layout.${m?.name || "net"}`;
+const netIdent = (m) => (m?.workspace ? "ws:" + m.workspace.id : m?.name);
 
 // ---------- nodes ----------
 // Network view: one block per device with inputs on the left and outputs on the right.
@@ -160,8 +163,53 @@ function toggleExpanded(id, open = !state.expanded.has(id)) {
   }
 }
 
+function currentLayout() {
+  const colors = {};
+  for (const d of state.model?.devices || []) if (state.colors.has(d.name)) colors[d.name] = state.colors.get(d.name);
+  return { positions: state.positions, expanded: [...state.expanded], colors };
+}
+let layoutTimer = null;
 function persistLayout() {
-  save(layoutKey(), { positions: state.positions, expanded: [...state.expanded] });
+  const layout = currentLayout();
+  save(layoutKey(), layout);
+  // The live network's workspace also keeps it in the app's data folder, so it survives
+  // anything that clears this window's storage.
+  const id = state.model?.workspace?.id;
+  if (!id) return;
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => {
+    fetch("api/workspace/layout", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, layout }) }).catch(() => {});
+  }, 1500);
+}
+
+function useLayout(saved) {
+  state.positions = structuredClone(saved?.positions || {});
+  state.expanded = new Set(saved?.expanded || []);
+  for (const [name, color] of Object.entries(saved?.colors || {})) state.colors.set(name, color);
+}
+
+// A workspace with no layout in this window yet: the copy in the data folder, else the
+// layout this port had before workspaces (the first time only).
+async function fetchWorkspaceLayout(model) {
+  const id = model.workspace.id;
+  let saved = null;
+  try {
+    const res = await fetch(`api/workspace/layout?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (res.ok) saved = (await res.json()).layout;
+  } catch {}
+  if (!saved && model.legacyName && claimLegacyLayout()) saved = load(`dv.layout.${model.legacyName}`, null);
+  if (!saved || state.model?.workspace?.id !== id) return;
+  useLayout(saved);
+  save(layoutKey(), saved);
+  render();
+  fit();
+}
+// Only the first workspace inherits the old per-port layout.
+function claimLegacyLayout() {
+  if (load("dv.layout.migrated", false)) return false;
+  save("dv.layout.migrated", true);
+  return true;
 }
 
 // ---------- rendering ----------
@@ -651,6 +699,7 @@ function renderPanel(byId) {
     ${(state.badges[d.name] || []).map((b) => `<p class="sev-text-${b.severity}"><b>${b.kind === "clock" ? "Clock problem" : "IP problem"}:</b> ${esc(b.text)}</p>`).join("")}
     ${state.routes.some((r) => r.dstDevice === d.name && r.failed) ? `<p class="sev-text-critical"><b>Failed routes:</b> in ${rangeText(state.routes.filter((r) => r.dstDevice === d.name && r.failed).map((r) => r.dstChannel))}</p>` : ""}
     <dl class="dev-info"></dl>
+    ${canForget(d) ? `<p><button class="forget" title="This device has left this network for good: stop expecting it here">Forget device</button> <span class="muted">offline; not expected on ${esc(state.model.workspace.name)} any more</span></p>` : ""}
     ${canIdentify(d) ? `<p><button class="identify" title="Blink this device's identify LED so you can find it in the rack">Identify</button> <span class="muted identify-msg"></span></p>` : ""}
     <h3>Receiving from</h3>
     <ul>${[...into].map(([o, rs]) => row(o, rs, "in")).join("") || '<li class="muted">Nothing</li>'}</ul>
@@ -658,8 +707,19 @@ function renderPanel(byId) {
     <ul>${[...outOf].map(([o, rs]) => row(o, rs, "out")).join("") || '<li class="muted">Nothing</li>'}</ul>`;
   panel.querySelector(".close").onclick = () => { state.selected = null; render(); };
   fillDeviceInfo(d);
+  const fgBtn = panel.querySelector(".forget");
+  if (fgBtn) fgBtn.onclick = async () => {
+    if (fgBtn.dataset.armed !== "1") { fgBtn.dataset.armed = "1"; fgBtn.textContent = "Click again to forget"; return; }
+    if (await forgetDevice(d.name)) { state.selected = null; refreshNow(); }
+  };
   const idBtn = panel.querySelector(".identify");
   if (idBtn) idBtn.onclick = () => identify(d.name, idBtn, panel.querySelector(".identify-msg"));
+}
+
+// An offline device on the live network can be forgotten: its workspace stops expecting it,
+// and it drops off the diagram and the monitor.
+function canForget(d) {
+  return state.model?.source === "live" && !!state.model.workspace && d.online === false;
 }
 
 // ---------- device info ----------
@@ -1235,16 +1295,18 @@ $("btn-save").onclick = saveSetup;
 
 // ---------- data ----------
 function setModel(model, { keepLayout = false } = {}) {
-  const first = !state.model || state.model.name !== model.name;
+  // A different network (or workspace) is a fresh start for the layout; a rename isn't.
+  const first = !state.model || netIdent(state.model) !== netIdent(model);
   state.model = model;
   draftOnModel(model);                         // a draft for this view goes back on it
   state.routes = buildRoutes(model);
-  model.devices.forEach((d, i) => { if (!state.colors.has(d.name)) state.colors.set(d.name, PALETTE[state.colors.size % PALETTE.length]); });
+  let fetchLayout = false;
   if (first && !keepLayout) {
     const saved = load(layoutKey(), null);
-    state.positions = saved?.positions || {};
-    state.expanded = new Set(saved?.expanded || []);
+    useLayout(saved);
+    fetchLayout = !saved && !!model.workspace;
   }
+  model.devices.forEach((d, i) => { if (!state.colors.has(d.name)) state.colors.set(d.name, PALETTE[state.colors.size % PALETTE.length]); });
   document.body.classList.add("loaded");
   if (model.source !== "live") leaveEdit();   // patching is for the live network only
   refreshCompare();
@@ -1253,7 +1315,8 @@ function setModel(model, { keepLayout = false } = {}) {
   showStatus(`${{ live: "Live" + via, setup: "Saved setup", offline: "Offline" }[model.source] || "Preset"}: ${model.name} · ${model.devices.length} devices · ${state.routes.length} routes` + (missing ? ` · ${missing} to devices not found` : ""));
   render();
   if (first && !keepLayout) fit();
-  if (first) { refreshEdit(); refreshSolo(); }
+  if (fetchLayout) fetchWorkspaceLayout(model);
+  if (first) { refreshEdit(); refreshSolo(); refreshWorkspace(); }
 }
 
 let statusHold = 0;   // a patch result stays up a few seconds, over the routine "Live: …" line
@@ -1370,6 +1433,19 @@ initDraft({
   redraw: () => { state.routes = buildRoutes(state.model); render(); },
   status: (text, error) => showStatus(text, error, 8000),
   push: () => pushDraft(),
+});
+
+// Re-read the network now (after a workspace switch, clear or forget), dropping a long poll in flight.
+function refreshNow() {
+  if (!live$.wanted) return;
+  stopPolling();
+  poll();
+}
+
+initWorkspace({
+  live: () => live$.wanted && state.model?.source === "live",
+  status: (text, error) => showStatus(text, error, 8000),
+  changed: () => { refreshNow(); refreshSolo(); refreshEdit(); },
 });
 
 initSolo({

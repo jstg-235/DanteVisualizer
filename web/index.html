@@ -33,9 +33,12 @@
     <button id="btn-solo" class="solo-btn" hidden title="Solo"><span class="solo-icon" aria-hidden="true">🎧</span><span class="solo-label">Solo</span></button>
     <button id="btn-undo" class="undo-btn" hidden disabled title="Nothing to undo">Undo</button>
     <button id="btn-edit" class="edit-btn" hidden aria-pressed="false" title="Read-only. Click to allow patching on the live network."><span class="edit-icon" aria-hidden="true">✎</span><span class="edit-label">Edit</span></button>
+    <button id="btn-ws" class="ws-btn" hidden title="Workspace for this network"><span class="ws-icon" aria-hidden="true">▦</span><span class="ws-label">Workspace</span></button>
     <button id="btn-live" class="live-btn wait" aria-pressed="true" title="Connecting to the live network"><span class="live-dot" aria-hidden="true"></span><span class="live-label">Connecting…</span></button>
     </div>
   </header>
+  <div id="ws-bar" class="ws-bar" hidden></div>
+  <div hidden><button id="ws-menu-new"></button><button id="ws-menu-clear"></button><button id="ws-menu-list"></button></div>
   <div id="cmp-bar" class="cmp-bar diagram-only" hidden>
     <span id="cmp-summary" class="cmp-summary"></span>
     <label class="cmp-toggle"><input type="checkbox" id="cmp-ghosts"> Ghost wires</label>
@@ -153,6 +156,7 @@
     </section>
     <div id="tooltip" class="tooltip" hidden></div>
     <div id="solo-pop" class="solo-pop" hidden></div>
+    <div id="ws-pop" class="solo-pop ws-pop" hidden></div>
     <div id="edit-banner" class="edit-banner" hidden><span id="edit-banner-text">EDITING</span></div>
     <div id="edit-hint" class="edit-hint" hidden></div>
     <dialog id="cascade" class="confirm cascade" aria-label="Cascade a patch">

@@ -209,3 +209,11 @@ class LevelHistory:
             self.clips.clear()
             self.clipping = set()   # a clip still going on counts again as a new one
             self.clips_since = time.time()
+
+    def reset(self):
+        """Start again: another network is on the cable, or the workspace was cleared."""
+        with self.lock:
+            self.tracks.clear()
+            self.dropouts.clear()
+            self.sec = None
+        self.clear_clips()
