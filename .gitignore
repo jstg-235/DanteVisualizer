@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 .DS_Store
 monitor-data/
+# Workspaces (one per Dante network: device lists, layouts, monitor history) and their exports.
+workspaces/
+*workspace.json

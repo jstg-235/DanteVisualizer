@@ -47,6 +47,19 @@ class Solo:
         except OSError as e:
             self.p.log(f"solo: can't save {self.path}: {e}")
 
+    def migrate(self, old_key, new_key):
+        """Carry a monitor output (and an active solo) saved under the old per-port name
+        over to the network's workspace, the first time it gets one."""
+        with self.p.lock:
+            moved = False
+            for part in ("outputs", "active"):
+                if old_key in self.data[part] and new_key not in self.data[part]:
+                    self.data[part][new_key] = self.data[part][old_key]
+                    moved = True
+            if moved:
+                self._save()
+                self.p.log(f"solo: carried {old_key}'s monitor output over to {new_key}")
+
     def _net(self):
         net = self.p._network_key()
         if net is None:
@@ -152,6 +165,15 @@ class Solo:
             if not active:
                 return {**self.status(), "applied": [], "failed": []}
             model = self.p.get_model()
+            dev = self.p._find(model or {"devices": []}, active.get("device") or "")
+            if not dev or dev.get("online") is False:
+                # The monitor output isn't on the network on the cable now (it was left, or is
+                # off). Keep the solo on record so Unsolo can put it back once it's here again.
+                failed = [{"rxDevice": active.get("device"), "rxChannel": rx,
+                           "error": f"{active.get('device')} isn't reachable; unsolo it when you're back on this network"}
+                          for rx in active.get("targets") or []]
+                self.p._write_log("unsolo", "unsolo (monitor output not reachable)", [], failed)
+                return {**self.status(), "applied": [], "failed": failed}
             changes, skipped = [], []
             srcs = active.get("sources") or []
             for k, rx in enumerate(active.get("targets") or []):

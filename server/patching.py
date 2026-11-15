@@ -63,6 +63,8 @@ class Patcher:
         model = model or self.get_model()
         if not model or model.get("source") != "live":
             return None
+        if "networkKey" in model:          # the network's workspace (None until it's known)
+            return model["networkKey"]
         return model.get("name")
 
     def status(self):
@@ -357,7 +359,9 @@ def end(e):
 
 
 def line(i):
-    return f"{i['rxDevice']} in {i['rxChannel']}: {end(i['before'])} -> {end(i['after'])}"
+    if "before" not in i:      # a change that was never planned (e.g. skipped by unsolo)
+        return f"{i.get('rxDevice', '?')} in {i.get('rxChannel', '?')}"
+    return f"{i['rxDevice']} in {i['rxChannel']}: {end(i['before'])} -> {end(i.get('after'))}"
 
 
 def describe(items):

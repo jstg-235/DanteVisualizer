@@ -539,3 +539,27 @@ body.drafting .edit-banner { background: var(--surface); color: #b45309; border:
 .row-draft { fill: #d97706; fill-opacity: .18; stroke: #d97706; stroke-dasharray: 3 2; }
 .wire.draft { stroke-dasharray: 7 4; filter: drop-shadow(0 0 2.5px #d97706); }
 .bundle-label.draft rect { stroke-dasharray: 4 3; }
+
+/* ---------- workspaces (one per Dante network) ---------- */
+.ws-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; max-width: 220px; }
+.ws-btn .ws-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-btn .ws-icon { color: var(--muted); }
+.ws-btn.missing .ws-icon { color: #dc2626; }
+.ws-bar[hidden] { display: none; }
+.ws-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 16px; font-size: 13px;
+  background: color-mix(in srgb, #2563eb 10%, var(--surface)); border-bottom: 1px solid #2563eb;
+}
+.ws-bar .ws-msg { margin-right: auto; }
+.ws-bar button { font-size: 12px; padding: 3px 10px; }
+.ws-bar button.primary { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 600; }
+.ws-bar .ws-name { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; }
+.ws-bar .ws-name input { font: inherit; width: 160px; }
+.ws-pop { width: min(380px, calc(100% - 32px)); max-height: calc(100% - 24px); overflow: auto; }
+.ws-pop .ws-row { display: flex; gap: 6px; margin-bottom: 8px; }
+.ws-pop .ws-row input { flex: 1; font: inherit; min-width: 0; }
+.ws-pop ul { list-style: none; margin: 0 0 8px; padding: 0; }
+.ws-pop li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.ws-pop li button { font-size: 11.5px; padding: 2px 8px; margin-left: 4px; }
+.ws-pop button.armed { border-color: #dc2626; color: #dc2626; }
+.ws-pop button.danger { color: #b91c1c; }
