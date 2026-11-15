@@ -208,7 +208,8 @@ class Patcher:
                 before = {"device": rx["subDevice"], "channel": t["id"] if t else None,
                           "name": rx.get("subChannel") or ""}
             same = (before is None and to is None) or (
-                before and to and before["device"] == to["device"] and before["name"] == to["name"])
+                before and to and before["device"] == to["device"]
+                and (before["name"] == to["name"] or before["channel"] == to["channel"]))
             if same:
                 continue
             items.append({
@@ -224,7 +225,7 @@ class Patcher:
         return len(items) > 1 or any(i["kind"] != "patch" for i in items)
 
     # ---- applying ----
-    def apply(self, changes, confirmed=False, label=None):
+    def apply(self, changes, confirmed=False, label=None, review=False):
         with self.lock:
             if not self.on:
                 raise PatchError(403, {"error": "Edit mode is off. Turn on Edit to patch."})
@@ -233,7 +234,7 @@ class Patcher:
             items = self.plan(changes)
             if not items:
                 return {"applied": [], "failed": [], "note": "nothing to change"}
-            if self.needs_confirm(items) and not confirmed:
+            if (review or self.needs_confirm(items)) and not confirmed:
                 raise PatchError(409, {"needsConfirm": True, "changes": items, "label": label})
             self.last_used = time.time()
             done, failed = self._run(items)

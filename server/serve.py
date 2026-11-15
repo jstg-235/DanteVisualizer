@@ -428,7 +428,8 @@ def main():
                         return self.send_json(200, patcher.set_edit(bool(body.get("on"))))
                     if path == "/api/patch":
                         res = patcher.apply(body.get("changes"), confirmed=body.get("confirmed") is True,
-                                            label=str(body.get("label") or "")[:200] or None)
+                                            label=str(body.get("label") or "")[:200] or None,
+                                            review=body.get("review") is True)
                     else:
                         res = patcher.undo()
                     return self.send_json(200, {**res, "edit": patcher.status()})

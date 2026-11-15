@@ -37,7 +37,9 @@ The app is read-only until you press **Edit** (next to **Live**, or Signal → E
 - **Only on the live network**, through the netaudio daemon. Edit is hidden for presets and saved setups and greyed out while offline.
 - **You can see it's on.** The button turns amber and counts down, an amber border runs round the diagram, and a banner names the network.
 - **It turns itself off** after 5 minutes with no patching, when the network changes, when the daemon disconnects, when you go offline and when the app restarts.
-- **Patching.** In Edit mode, click an input (or a wire) and its card gets **Patch from** (every output on the network) and **Unpatch**. A new patch on an empty input goes straight through.
+- **Click to patch.** In Edit mode, click an output to pick it (it lights amber and a hint says what's picked), then click an input to patch it there. Esc cancels. A new patch on an empty input goes straight through.
+- **Shift-click to cascade.** Shift-click a patched input or a wire, say how many of the next inputs to fill, and each gets the next output in turn (in 3 ← out 5 cascaded by 4 gives in 4–7 ← out 6–9). Every change shows on the confirm card first, and Undo takes the whole cascade back in one step.
+- **From the card.** Clicking an input (or a wire) in Edit mode also gives **Patch from** (every output on the network) and **Unpatch**.
 - **Confirm before anything that can hurt.** Unpatching, replacing a patch, or more than one change at once opens a confirm card listing each input with what it has now and what it will have, with inputs carrying signal flagged red. Nothing is sent until you press Apply.
 - **Undo** (or ⌘Z) puts back what was there, one change or group at a time, as long as nobody changed that input since.
 - **Change log.** Every change (time, network, before, after, and whether it worked) goes to `patch-log.jsonl` in the app's data folder.

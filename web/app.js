@@ -3,7 +3,7 @@ import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered, monitorSta
 import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
 import { mountHistory, closeHistory } from "./history.js";
 import { initSolo, mountSoloControls, refresh as refreshSolo } from "./solo.js";
-import { initEdit, edit, leaveEdit, mountPatchControls, refresh as refreshEdit } from "./edit.js";
+import { initEdit, edit, leaveEdit, mountPatchControls, refresh as refreshEdit, patch } from "./edit.js";
 import { initCompare, ghostRoutes, liveMark, refreshCompare, compareLine, ghostText, hideComparePanel } from "./compare-ui.js";
 
 // ---------- geometry ----------
@@ -25,6 +25,7 @@ const state = {
   view: { x: 40, y: 40, k: 1 },
   selected: null,                         // node id
   hoverRoute: null,
+  armed: null,           // Edit mode: the output picked to patch from, {device, ch}
   trace: null,           // what was clicked: {kind:'channel',device,side,ch} | {kind:'route',id} | {kind:'bundle',key}
   colors: new Map(),
   levels: null,                           // { device: { tx: [dB|null], rx: [dB|null], age } }
@@ -468,6 +469,8 @@ function drawNode(n, groups) {
       const end = live.ends?.has(`${d.name}|${side}|${c.id}`);
       const picked = state.trace?.kind === "channel" && state.trace.device === d.name && state.trace.side === side && state.trace.ch === c.id;
       if (end || picked) el("rect", { x: side === "rx" ? 6 : W / 2, y: y - ROW / 2, width: W / 2 - 6, height: ROW, rx: 4, class: "row-traced" + (picked ? " picked" : "") }, g);
+      if (side === "tx" && state.armed?.device === d.name && state.armed.ch === c.id)
+        el("rect", { x: W / 2, y: y - ROW / 2, width: W / 2 - 6, height: ROW, rx: 4, class: "row-armed" }, g);
       const label = el("text", {
         x: side === "rx" ? 22 : W - 22, y: y + 4, "text-anchor": side === "rx" ? "start" : "end",
         class: "chan" + (routed ? "" : " unused") + (failed ? " failed" : "") + (end || picked ? " traced" : ""),
@@ -711,12 +714,102 @@ function clickable(elm, trace, _a, _b, d, hitWidth) {
   target.addEventListener("pointerdown", (e) => e.stopPropagation());
   target.addEventListener("click", (e) => {
     e.stopPropagation();
+    if (editClick(trace, e)) return;
     const same = JSON.stringify(state.trace) === JSON.stringify(trace);
     state.trace = same ? null : trace;
     traceCard.at = same ? null : { x: e.clientX, y: e.clientY };
     render();
   });
 }
+// ---------- Edit mode: click to patch, shift-click to cascade ----------
+// Click an output to pick it (no click card in Edit mode; turn Edit off to see an output's
+// card), then click an input to patch it there. Shift-click a patched
+// input or a wire to repeat that patch down the next X inputs. Nothing here works with Edit off.
+function editClick(trace, e) {
+  if (!edit.on || state.model?.source !== "live") return false;
+  if (trace.kind === "channel" && trace.side === "tx" && !e.shiftKey) {
+    const same = state.armed?.device === trace.device && state.armed.ch === trace.ch;
+    // No click card here: it would sit over the inputs you're about to click.
+    state.trace = null;
+    traceCard.at = null;
+    setArmed(same ? null : { device: trace.device, ch: trace.ch });
+    return true;
+  }
+  if (trace.kind === "channel" && trace.side === "rx" && state.armed && !e.shiftKey) {
+    const a = state.armed;
+    state.trace = null;                 // the output's card is done with
+    traceCard.at = null;
+    setArmed(null);
+    patch([{ rxDevice: trace.device, rxChannel: trace.ch, txDevice: a.device, txChannel: a.ch }],
+      `patch ${a.device} out ${a.ch} to ${trace.device} in ${trace.ch}`);
+    return true;
+  }
+  if (e.shiftKey && (trace.kind === "route" || (trace.kind === "channel" && trace.side === "rx"))) {
+    const r = trace.kind === "route" ? state.routes.find((x) => x.id === trace.id)
+      : state.routes.find((x) => x.dstDevice === trace.device && x.dstChannel === trace.ch);
+    if (!r || r.missing || r.srcChannel == null) { showStatus("Shift-click a patched input or a wire to cascade it", true, 5000); return true; }
+    cascade(r);
+    return true;
+  }
+  return false;
+}
+function setArmed(a) {
+  state.armed = a;
+  const hint = $("edit-hint");
+  hint.hidden = !a;
+  if (a) hint.textContent = `Patching from ${a.device} out ${a.ch}: click an input to patch it · Esc cancels`;
+  render();
+}
+// The next X inputs after r's input get the next X outputs after r's output.
+function cascadePlan(r, x) {
+  const dst = state.model.devices.find((d) => d.name === r.dstDevice);
+  const src = state.model.devices.find((d) => d.name === r.srcDevice);
+  if (!dst || !src) return [];
+  const di = dst.rx.findIndex((c) => c.id === r.dstChannel), si = src.tx.findIndex((c) => c.id === r.srcChannel);
+  const out = [];
+  for (let k = 1; k <= x; k++) {
+    const rc = dst.rx[di + k], tc = src.tx[si + k];
+    if (!rc || !tc) break;
+    out.push({ rxDevice: dst.name, rxChannel: rc.id, txDevice: src.name, txChannel: tc.id });
+  }
+  return out;
+}
+function cascade(r) {
+  const dst = state.model.devices.find((d) => d.name === r.dstDevice);
+  const src = state.model.devices.find((d) => d.name === r.srcDevice);
+  const max = Math.min(dst.rx.length - 1 - dst.rx.findIndex((c) => c.id === r.dstChannel),
+                       src.tx.length - 1 - src.tx.findIndex((c) => c.id === r.srcChannel));
+  if (max < 1) { showStatus(`Nothing to cascade into: ${max < 0 ? "" : "no more channels after this one"}`, true, 5000); return; }
+  const dlg = $("cascade"), input = $("cascade-n");
+  input.max = String(max);
+  input.value = String(Math.min(Number(input.value) || 7, max));
+  $("cascade-title").textContent = `Cascade ${r.srcDevice} out ${r.srcChannel} → ${r.dstDevice} in ${r.dstChannel}`;
+  const preview = () => {
+    const n = Math.max(0, Math.min(max, Math.floor(Number(input.value) || 0)));
+    const plan = cascadePlan(r, n);
+    $("cascade-preview").textContent = plan.length
+      ? `${r.dstDevice} in ${plan[0].rxChannel}–${plan.at(-1).rxChannel} ← ${r.srcDevice} out ${plan[0].txChannel}–${plan.at(-1).txChannel}`
+      : "Enter how many inputs.";
+    $("cascade-ok").disabled = !plan.length;
+    return plan;
+  };
+  input.oninput = preview;
+  preview();
+  $("cascade-max").textContent = `up to ${max}`;
+  const finish = (go) => {
+    dlg.close();
+    if (!go) return;
+    const plan = preview();
+    if (plan.length) patch(plan, `cascade ${r.srcDevice} out ${plan[0].txChannel}–${plan.at(-1).txChannel} to ${r.dstDevice} in ${plan[0].rxChannel}–${plan.at(-1).rxChannel}`, { review: true });
+  };
+  $("cascade-ok").onclick = () => finish(true);
+  $("cascade-cancel").onclick = () => finish(false);
+  $("cascade-form").onsubmit = (ev) => { ev.preventDefault(); if (!$("cascade-ok").disabled) finish(true); };
+  dlg.oncancel = (ev) => { ev.preventDefault(); finish(false); };
+  dlg.showModal();
+  input.select();
+}
+
 function clearTrace() {
   if (!state.trace) return false;
   state.trace = null;
@@ -948,7 +1041,7 @@ function updateExpandButton() {
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
   if (state.view$ !== "diagram") return;
-  if (e.key === "Escape") clearTrace();
+  if (e.key === "Escape") { if (state.armed) setArmed(null); else clearTrace(); }
   if (e.key === "e" || e.key === "E") $("btn-expand").click();
   if (e.key === "b" || e.key === "B") $("btn-bw").click();
 });
@@ -1175,6 +1268,7 @@ initEdit({
   canEdit: () => live$.wanted && state.model?.source === "live",
   status: (text, error) => showStatus(text, error, 8000),
   changed: () => {
+    if (!edit.on && state.armed) setArmed(null);
     render();
     refreshSolo();
     // With the daemon, the long poll brings the change the moment it lands; otherwise ask now.
