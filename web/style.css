@@ -160,6 +160,15 @@ body.has-levels .node .sig { display: inline; fill: var(--sig-off); }
 .node .sig.clip { fill: var(--sig-clip); }
 .node .sig.unknown { fill: none; stroke: var(--sig-off); stroke-dasharray: 2 2; }
 .node .live-count { font-size: 11.5px; fill: var(--muted); }
+.node .clip-ring { display: none; fill: none; stroke: var(--sig-clip); stroke-width: 1.8; pointer-events: none; }
+body.has-levels .node .clip-ring.on { display: inline; }
+.node .live-count .clip-count { fill: var(--sig-clip); font-weight: 650; }
+.clips-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.clips-btn .clip-led { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--sig-off); box-sizing: border-box; }
+.clips-btn.has { color: var(--sig-clip); border-color: var(--sig-clip); font-weight: 600; }
+.clips-btn.has .clip-led { background: var(--sig-clip); border-color: var(--sig-clip); }
+.clips-btn .count { background: var(--sig-clip); color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; }
+.clips-btn:disabled { cursor: default; }
 .node .live-count.on { fill: var(--sig-on); font-weight: 600; }
 body.has-levels .wire.single { opacity: .22; }
 body.has-levels .wire.single.live { opacity: .95; stroke-width: 2; }
@@ -495,9 +504,9 @@ body.editing main::after {
 .solo-slot p { margin: 4px 0 0; font-size: 12px; }
 
 /* The right-hand cluster stays on one line; the status text gives way first. */
-.bar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 260px; justify-content: flex-end; }
+.bar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: min-content; flex: 1 1 260px; justify-content: flex-end; }
 .bar-right > button { flex: none; }
-.bar-right .status { margin-left: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.bar-right .status { margin-left: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; contain: inline-size; text-align: right; }
 
 /* ---------- Edit mode: click to patch, cascade ---------- */
 .row-armed { fill: #d97706; fill-opacity: .28; stroke: #d97706; stroke-width: 1.5; }

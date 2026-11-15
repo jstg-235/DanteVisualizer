@@ -481,8 +481,10 @@ function drawNode(n, groups) {
       }, g);
       label.textContent = `${c.id} ${shorten(c.name === String(c.id).padStart(2, "0") || c.name === String(c.id) ? "" : c.name, 16)}`.trim();
       el("circle", { cx: side === "rx" ? 0 : W, cy: y, r: routed ? 3 : 2, class: "port" + (routed ? "" : " unused") }, g);
+      // Clip indicator: a red ring around the signal dot, latched until Clear clips.
+      const ring = el("circle", { cx: side === "rx" ? 13 : W - 13, cy: y, r: 6.2, class: "clip-ring" }, g);
       const dot = el("circle", { cx: side === "rx" ? 13 : W - 13, cy: y, r: 3.6, class: "sig" }, g);
-      live.dots.push({ el: dot, device: d.name, side, ch: c.id });
+      live.dots.push({ el: dot, ring, device: d.name, side, ch: c.id });
       // Click anywhere on the row (not just the text) to trace it.
       const hit = el("rect", { x: side === "rx" ? 0 : W / 2, y: y - ROW / 2, width: W / 2, height: ROW, class: "row-hit" }, g);
       clickable(hit, { kind: "channel", device: d.name, side, ch: c.id });
@@ -514,7 +516,10 @@ const dbText = (db) => (db === undefined ? "no reading" : db === null || db < SI
 function applyLevels() {
   const have = !!state.levels;
   document.body.classList.toggle("has-levels", have);
-  for (const x of live.dots) x.el.setAttribute("class", "sig " + sigClass(levelOf(x.device, x.side, x.ch)));
+  for (const x of live.dots) {
+    x.el.setAttribute("class", "sig " + sigClass(levelOf(x.device, x.side, x.ch)));
+    x.ring.classList.toggle("on", !!clipOf(x.device, x.side, x.ch));
+  }
   for (const x of live.wires) {
     const r = x.route;
     const c = sigClass(levelOf(r.srcDevice, "tx", r.srcChannel));
@@ -543,10 +548,84 @@ function applyLevels() {
     const parts = [];
     if (x.rx) parts.push(`${count(d.rx)} in`);
     if (x.tx) parts.push(`${count(d.tx)} out`);
-    x.el.textContent = `● Signal on ${parts.join(" · ")}`;
+    const nClip = (x.rx ? clipCount(x.device, "rx") : 0) + (x.tx ? clipCount(x.device, "tx") : 0);
+    const text = `● Signal on ${parts.join(" · ")}`;
+    const key = text + "|" + nClip;
+    if (x.key !== key) {
+      x.key = key;
+      x.el.textContent = text;
+      if (nClip) {
+        const t = el("tspan", { class: "clip-count" }, x.el);
+        t.textContent = `  ·  ${nClip} clipped`;
+      }
+    }
     x.el.setAttribute("class", "live-count" + (count(d.rx) + count(d.tx) ? " on" : ""));
   }
+  updateClipsButton();
 }
+
+// ---------- clips ----------
+// The server latches every channel that reached full scale since monitoring started (or
+// since Clear clips): /api/clips. Shown as a red ring around the channel's signal dot, a
+// count on closed blocks, and a line in the click card.
+function clipOf(device, side, ch) { return state.clips?.devices?.[device]?.[side]?.[String(ch)]; }
+function clipCount(device, side) { return Object.keys(state.clips?.devices?.[device]?.[side] || {}).length; }
+function clipTotal() {
+  const names = new Set((state.model?.devices || []).map((d) => d.name));
+  let n = 0;
+  for (const [dev, v] of Object.entries(state.clips?.devices || {}))
+    if (names.has(dev)) n += Object.keys(v.tx || {}).length + Object.keys(v.rx || {}).length;
+  return n;
+}
+function updateClipsButton() {
+  const b = $("btn-clips");
+  const n = clipTotal();
+  b.hidden = !state.levels;
+  b.disabled = !n;
+  b.classList.toggle("has", n > 0);
+  const since = state.clips?.since ? clockText(state.clips.since) : null;
+  b.title = n ? `${n} channel${n > 1 ? "s" : ""} clipped${since ? ` since ${since}` : ""}. Click to clear.` : `No clips${since ? ` since ${since}` : ""}`;
+  const label = n ? `Clear clips` : "No clips";
+  const lab = b.querySelector(".clips-label"), cnt = b.querySelector(".count");
+  if (lab.textContent !== label) lab.textContent = label;
+  cnt.hidden = !n;
+  if (cnt.textContent !== String(n)) cnt.textContent = String(n);
+}
+const clockText = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+function clipLine(device, side, ch) {
+  const c = clipOf(device, side, ch);
+  if (!c) return `<span class="clip-line"></span>`;
+  const when = c.count > 1 ? `first ${clockText(c.first)}, last ${clockText(c.last)}` : `at ${clockText(c.last)}`;
+  return `<span class="clip-line"><br><b class="sev-text-critical">${c.now ? "Clipping now" : `Clipped ${c.count}×`}</b> <span class="muted">${c.now && c.count > 1 ? `${c.count}× · ` : ""}${when}</span></span>`;
+}
+function refreshClipLine() {
+  const t = state.trace;
+  const slot = t?.kind === "channel" && !tooltip.hidden && tooltip.querySelector(".clip-line");
+  if (slot) slot.outerHTML = clipLine(t.device, t.side, t.ch);
+}
+let clipsTimer = null, clipsLoop = 0;
+async function pollClips(loop = ++clipsLoop) {
+  clearTimeout(clipsTimer);
+  clipsTimer = -1;
+  try {
+    const res = await fetch("api/clips", { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json();
+      const changed = JSON.stringify(data) !== JSON.stringify(state.clips);
+      state.clips = data;
+      if (changed && !dragging) { applyLevels(); refreshClipLine(); }
+    }
+  } catch {}
+  if (live$.wanted && loop === clipsLoop) clipsTimer = setTimeout(() => pollClips(loop), 1000);
+}
+document.getElementById("btn-clips").onclick = async () => {
+  try {
+    const res = await fetch("api/clips/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (res.ok) state.clips = await res.json();
+  } catch {}
+  applyLevels();
+  refreshClipLine();
+};
 
 function shorten(s, max) { return s.length > max ? s.slice(0, max - 1) + "…" : s; }
 
@@ -894,7 +973,7 @@ function placeCard(at) {
 function channelText(t, rs) {
   const d = state.model.devices.find((x) => x.name === t.device);
   const c = d?.[t.side]?.find((x) => x.id === t.ch) || { id: t.ch, name: "" };
-  const lv = state.levels ? ` · ${dbText(levelOf(t.device, t.side, t.ch))}` : "";
+  const lv = (state.levels ? ` · ${dbText(levelOf(t.device, t.side, t.ch))}` : "") + clipLine(t.device, t.side, t.ch);
   if (t.side === "rx") {
     const r = rs[0];
     return `<b>${esc(t.device)}</b> in ${c.id} <span class="muted">${esc(c.name)}</span>${lv}<br>` +
@@ -1379,7 +1458,7 @@ async function poll() {
 // Poll signal levels several times a second when the server provides them.
 let levelsMisses = 0;
 let levelsTimer = null;
-function stopLevels() { clearTimeout(levelsTimer); levelsTimer = null; }
+function stopLevels() { clearTimeout(levelsTimer); levelsTimer = null; clearTimeout(clipsTimer); clipsTimer = null; clipsLoop++; }
 async function pollLevels() {
   clearTimeout(levelsTimer);
   let delay = 250;
@@ -1392,6 +1471,7 @@ async function pollLevels() {
     if (!live$.wanted) return;
     state.levels = data.devices || {};
     levelsMisses = 0;
+    if (clipsTimer === null) pollClips();
     if (!dragging) applyLevels();
   } catch {
     if (!live$.wanted) return;

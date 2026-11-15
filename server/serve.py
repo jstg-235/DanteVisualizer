@@ -24,7 +24,8 @@ Data sources (pick one):
 
 Level history: whatever levels are served are also recorded, one peak per channel per
 second for the last hour, at /api/history?device=&side=tx|rx&ch=&seconds=, and dropouts
-found in them at /api/dropouts (see level_history.py). In memory only.
+found in them at /api/dropouts (see level_history.py). Channels that clipped since monitoring
+started are latched at /api/clips until POST /api/clips/clear. In memory only.
 
 Read-only unless Edit mode is on (see patching.py). With --daemon, these reach devices on request:
 POST /api/identify blinks one device's identify LED, POST /api/metering asks devices to send
@@ -437,6 +438,9 @@ def main():
                     return self.send_json(e.status, {**e.body, "edit": patcher.status()})
                 except OSError as e:
                     return self.send_json(502, {"error": f"netaudio daemon: {e}", "edit": patcher.status()})
+            if path == "/api/clips/clear":
+                history.clear_clips()
+                return self.send_json(200, {"ok": True, **history.clip_map()})
             if path == "/api/dropouts/clear":
                 history.clear_dropouts()
                 return self.send_json(200, {"ok": True})
@@ -504,6 +508,8 @@ def main():
                 return self.send_json(200, history.series(q.get("device", [""])[0], side, ch, seconds))
             if path == "/api/dropouts":
                 return self.send_json(200, history.dropout_list())
+            if path == "/api/clips":
+                return self.send_json(200, history.clip_map())
             if self.path.split("?")[0] == "/api/snapshot":
                 model = source.get()
                 if model is None:
