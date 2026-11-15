@@ -42,7 +42,15 @@ function show(s) {
   b.title = solo.active ? `Soloing to ${outText(solo.output)}. Click for Unsolo.`
     : solo.output ? `Monitor output: ${outText(solo.output)}. Click a channel or wire, then Solo.`
     : "No monitor output chosen yet for this network. Click to set one (needs Edit).";
-  if (!$("solo-pop").hidden) renderPop();
+  // The 5 s refresh re-draws an open popover. Leave it alone while the monitor output form
+  // has focus (an open dropdown would close); the picks themselves live in pop.dataset.
+  const pop = $("solo-pop");
+  if (!pop.hidden && !pop.querySelector(".solo-form")?.contains(document.activeElement)) renderPop();
+}
+
+// What's being picked in the monitor output form but not saved yet.
+function clearPicks(pop) {
+  for (const k of ["dev", "mode", "left", "right"]) delete pop.dataset[k];
 }
 
 async function post(path, body) {
@@ -79,7 +87,7 @@ export const soloOff = () => run("api/solo/off", {}, "Unsolo: monitor output put
 function togglePop() {
   const pop = $("solo-pop");
   pop.hidden = !pop.hidden;
-  if (!pop.hidden) renderPop();
+  if (!pop.hidden) { clearPicks(pop); renderPop(); }
 }
 
 function renderPop() {
@@ -102,7 +110,16 @@ function renderPop() {
     const chOpts = (sel) => (dev?.rx || []).map((c) => `<option value="${c.id}"${c.id === sel ? " selected" : ""}>in ${c.id}${c.name && c.name !== String(c.id) ? " · " + esc(c.name) : ""}</option>`).join("");
     const same = dev && dev.name === o.device;
     const mode = pop.dataset.mode || o.mode || "stereo";
-    const left = same ? o.left : dev?.rx[0]?.id, right = same && o.right ? o.right : dev?.rx[1]?.id;
+    const has = (id) => dev?.rx.some((c) => c.id === id);
+    const pick = (k) => (pop.dataset[k] ? Number(pop.dataset[k]) : null);
+    let left = pick("left") ?? (same ? o.left : dev?.rx[0]?.id);
+    if (!has(left)) left = dev?.rx[0]?.id;
+    // Right defaults to the input after left (89 -> 90), not to input 2.
+    let right = pick("right") ?? (same && o.right && pick("left") == null ? o.right : null);
+    if (!has(right) || right === left) {
+      const i = dev ? dev.rx.findIndex((c) => c.id === left) : -1;
+      right = dev?.rx.find((c) => c.id === left + 1)?.id ?? dev?.rx[i + 1]?.id ?? dev?.rx.find((c) => c.id !== left)?.id;
+    }
     html += `<div class="solo-form">
       <label>Device <select id="so-dev">${devs.map((d) => `<option${d === dev ? " selected" : ""}>${esc(d.name)}</option>`).join("")}</select></label>
       <div class="seg" role="group" aria-label="Stereo or mono"><button id="so-st" aria-pressed="${mode === "stereo"}">Stereo</button><button id="so-mo" aria-pressed="${mode === "mono"}">Mono</button></div>
@@ -117,17 +134,22 @@ function renderPop() {
   const q = (id) => pop.querySelector("#" + id);
   if (q("solo-off")) q("solo-off").onclick = () => soloOff();
   if (q("so-dev")) {
-    q("so-dev").onchange = () => { pop.dataset.dev = q("so-dev").value; renderPop(); };
+    q("so-dev").onchange = () => { pop.dataset.dev = q("so-dev").value; delete pop.dataset.left; delete pop.dataset.right; renderPop(); };
+    q("so-l").onchange = () => {
+      pop.dataset.left = q("so-l").value;
+      if (q("so-r") && !pop.dataset.right) { delete pop.dataset.right; renderPop(); }   // move right along with left
+    };
+    if (q("so-r")) q("so-r").onchange = () => { pop.dataset.right = q("so-r").value; };
     q("so-st").onclick = () => { pop.dataset.mode = "stereo"; renderPop(); };
     q("so-mo").onclick = () => { pop.dataset.mode = "mono"; renderPop(); };
     q("so-save").onclick = async () => {
       const m = pop.dataset.mode || solo.output?.mode || "stereo";
       const { status, data } = await post("api/solo/output", { device: q("so-dev").value, mode: m, left: Number(q("so-l").value), right: q("so-r") ? Number(q("so-r").value) : null });
       if (status !== 200) hooks.status(data.error || "Couldn't save the monitor output", true);
-      else { hooks.status(`Monitor output: ${outText(data.output)}`); delete pop.dataset.dev; delete pop.dataset.mode; }
+      else { hooks.status(`Monitor output: ${outText(data.output)}`); clearPicks(pop); }
       renderPop();
     };
-    if (q("so-clear")) q("so-clear").onclick = async () => { await post("api/solo/output", { clear: true }); renderPop(); };
+    if (q("so-clear")) q("so-clear").onclick = async () => { await post("api/solo/output", { clear: true }); clearPicks(pop); renderPop(); };
   }
 }
 
