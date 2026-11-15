@@ -7,22 +7,33 @@
 // change at once, come back from the server as a plan, shown here on a confirm card, and are
 // only sent again once the person presses Apply. Every change can be undone (Undo, or ⌘Z).
 
+import { draft, setDraftEditing, draftPatch, undoDraft } from "./draft.js";
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 export const edit = { available: false, on: false, remaining: 0, network: null, undo: 0, undoLabel: null, demo: false };
-let hooks = { canEdit: () => false, changed: () => {}, status: () => {} };
+let hooks = { canEdit: () => false, canDraft: () => false, draftName: () => "", changed: () => {}, status: () => {} };
+
+// Patching is on: Edit on the live network, or editing a draft of an offline view.
+export const editing = () => edit.on || draft.on;
 let timer = null;
 let busy = false;
 
 export function initEdit(h) {
   hooks = { ...hooks, ...h };
-  $("btn-edit").onclick = () => setEdit(!edit.on);
-  $("btn-undo").onclick = () => undo();
+  $("btn-edit").onclick = () => {
+    if (draft.on || (!edit.on && !hooks.canEdit() && hooks.canDraft())) {
+      setDraftEditing(!draft.on);
+      show({});
+      hooks.changed();
+    } else setEdit(!edit.on);
+  };
+  $("btn-undo").onclick = () => (draft.on ? (undoDraft(), show({})) : undo());
   document.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "z" && edit.on && !e.target.closest("input, textarea, select")) {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "z" && editing() && !e.target.closest("input, textarea, select")) {
       e.preventDefault();
-      undo();
+      if (draft.on) { undoDraft(); show({}); } else undo();
     }
   });
   refresh();
@@ -45,25 +56,31 @@ function show(s) {
   const was = edit.on;
   Object.assign(edit, s);
   const canEdit = edit.available && hooks.canEdit();
+  const canDraft = !canEdit && hooks.canDraft();
   const b = $("btn-edit");
-  b.hidden = !edit.available;
-  b.disabled = !edit.on && !canEdit;
-  b.classList.toggle("on", edit.on);
-  b.setAttribute("aria-pressed", String(edit.on));
+  b.hidden = !edit.available && !canDraft && !draft.on;
+  b.disabled = !edit.on && !draft.on && !canEdit && !canDraft;
+  b.classList.toggle("on", edit.on || draft.on);
+  b.classList.toggle("draft", draft.on);
+  b.setAttribute("aria-pressed", String(edit.on || draft.on));
   const m = Math.floor(edit.remaining / 60), sec = String(edit.remaining % 60).padStart(2, "0");
-  b.querySelector(".edit-label").textContent = edit.on ? `Editing · ${m}:${sec}` : "Edit";
-  b.title = edit.on
-    ? `Patching is on for ${edit.network}. It turns off after ${Math.round(edit.idleLimit / 60)} minutes with no patching. Click to stop editing.`
+  b.querySelector(".edit-label").textContent = draft.on ? "Editing draft" : edit.on ? `Editing · ${m}:${sec}` : canDraft ? "Edit draft" : "Edit";
+  b.title = draft.on ? "Editing a draft: nothing is sent until you push it to the live network. Click to stop editing."
+    : edit.on ? `Patching is on for ${edit.network}. It turns off after ${Math.round(edit.idleLimit / 60)} minutes with no patching. Click to stop editing.`
     : canEdit ? "Read-only. Click to allow patching on the live network."
+    : canDraft ? "Plan patch changes on this view. Nothing is sent until you push the draft to the live network."
     : "Patching works only while following the live network.";
   const u = $("btn-undo");
-  u.hidden = !edit.on;
-  u.disabled = !edit.undo || busy;
-  u.title = edit.undo ? `Undo ${edit.undoLabel} (⌘Z)` : "Nothing to undo";
-  document.body.classList.toggle("editing", edit.on);
-  $("edit-banner").hidden = !edit.on;
-  $("edit-banner-text").textContent = `EDITING · ${edit.network || ""} · ` +
-    (edit.demo ? "pretend changes, demo only" : "changes go straight to the devices");
+  u.hidden = !edit.on && !draft.on;
+  u.disabled = draft.on ? !draft.groups.length : !edit.undo || busy;
+  u.title = draft.on ? (draft.groups.length ? `Undo ${draft.groups.at(-1).label || "the last draft change"} (⌘Z)` : "Nothing to undo")
+    : edit.undo ? `Undo ${edit.undoLabel} (⌘Z)` : "Nothing to undo";
+  document.body.classList.toggle("editing", edit.on || draft.on);
+  document.body.classList.toggle("drafting", draft.on && !edit.on);
+  $("edit-banner").hidden = !edit.on && !draft.on;
+  $("edit-banner-text").textContent = draft.on && !edit.on
+    ? `EDITING DRAFT · ${hooks.draftName() || ""} · nothing is sent until you push it`
+    : `EDITING · ${edit.network || ""} · ` + (edit.demo ? "pretend changes, demo only" : "changes go straight to the devices");
   if (was && !edit.on) {
     hooks.status(edit.offReason && edit.offReason !== "turned off" ? `Edit mode off: ${edit.offReason}` : "Edit mode off");
   }
@@ -78,12 +95,14 @@ async function post(path, body) {
   return { status: res.status, data };
 }
 
-export async function setEdit(on) {
-  if (on && !hooks.canEdit()) return;
+// force: turn Edit on for the live network from an offline view (pushing a draft).
+export async function setEdit(on, { force = false } = {}) {
+  if (on && !force && !hooks.canEdit()) return false;
   const { status, data } = await post("api/edit", { on });
   if (status !== 200) hooks.status(data.error || "Couldn't change Edit mode", true);
   else show(data);
   refresh();
+  return edit.on === on;
 }
 
 // Turn Edit off without asking (going offline, opening a preset).
@@ -93,7 +112,16 @@ export function leaveEdit() { if (edit.on) setEdit(false); }
 const endText = (e) => e ? `${esc(e.device)} out ${e.channel ?? "?"}${e.name && String(e.name) !== String(e.channel) ? ` <span class="muted">${esc(e.name)}</span>` : ""}` : `<span class="muted">nothing</span>`;
 
 // review: always show the confirm card first (a cascade), even when nothing needs it.
-export async function patch(changes, label, { review = false } = {}) {
+// server: send to the live network even while a draft is open (pushing the draft).
+export async function patch(changes, label, { review = false, server = false } = {}) {
+  if (draft.on && !server) {
+    const res = draftPatch(changes, label);
+    const n = res.applied.length;
+    hooks.status(n ? `Draft: ${label || `${n} change${n > 1 ? "s" : ""}`} (not sent)` : res.failed.length ? `Draft: ${res.failed[0].error}` : "Nothing to change", !n && res.failed.length > 0);
+    show({});
+    hooks.changed();
+    return res;
+  }
   if (!edit.on || busy) return null;
   busy = true;
   try {
@@ -174,7 +202,7 @@ function confirmCard(items, label) {
 // ---------- the patch controls on an input's click card (Edit mode only) ----------
 // "Patch from" lists every output on the network; "Unpatch" removes the patch.
 export function mountPatchControls(slot, model, device, ch, route) {
-  if (!edit.on || !slot) { if (slot) slot.remove(); return; }
+  if (!editing() || !slot) { if (slot) slot.remove(); return; }
   const dev = model.devices.find((d) => d.name === device);
   const opts = model.devices.filter((d) => d.tx.length && d.online !== false).map((d) =>
     `<optgroup label="${esc(d.name)}">` + d.tx.map((t) =>

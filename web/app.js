@@ -3,7 +3,8 @@ import { initMonitor, toggleSidebar, showMonitorTab, monitorRendered, monitorSta
 import { routesMbps, deviceTraffic, mbpsText } from "./bandwidth.js";
 import { mountHistory, closeHistory } from "./history.js";
 import { initSolo, mountSoloControls, refresh as refreshSolo } from "./solo.js";
-import { initEdit, edit, leaveEdit, mountPatchControls, refresh as refreshEdit, patch } from "./edit.js";
+import { initEdit, edit, editing, leaveEdit, setEdit, mountPatchControls, refresh as refreshEdit, patch } from "./edit.js";
+import { initDraft, draft, onModel as draftOnModel, isDrafted, planPush, clearDraft } from "./draft.js";
 import { initCompare, ghostRoutes, liveMark, refreshCompare, compareLine, ghostText, hideComparePanel } from "./compare-ui.js";
 
 // ---------- geometry ----------
@@ -276,7 +277,8 @@ function render() {
       const failed = g.routes.filter((r) => r.failed).length;
       const d = curve(a, b, laneY);
       const marks = g.routes.map((r) => liveMark(r.id));
-      const mark = marks.includes("differs") ? " cmp-differs" : marks.includes("liveOnly") ? " cmp-liveOnly" : "";
+      const mark = (marks.includes("differs") ? " cmp-differs" : marks.includes("liveOnly") ? " cmp-liveOnly" : "") +
+        (g.routes.some((r) => drafted(r.dstDevice, r.dstChannel)) ? " draft" : "");
       const path = el("path", { d, class: "wire bundle" + (dim ? " dim" : "") + (lit ? " traced" : "") + (failed ? " failed" : "") + mark, stroke: color, "stroke-width": width }, wiresLayer);
       clickable(path, { kind: "bundle", key }, null, null, d, Math.max(12, width + 6));
       const bwText = bw != null ? ` · ${mbpsText(bw)}` : "";
@@ -299,7 +301,7 @@ function render() {
         const hot = state.hoverRoute === r.id;
         const d = curve(a, b, back ? laneBase : null);
         const faded = tracing ? !isTraced(r) : dim && !related(r);
-        const path = el("path", { d, class: "wire single" + (faded ? " dim" : "") + (isTraced(r) ? " traced" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : "") + (liveMark(r.id) ? " cmp-" + liveMark(r.id) : ""), stroke: color }, wiresLayer);
+        const path = el("path", { d, class: "wire single" + (faded ? " dim" : "") + (isTraced(r) ? " traced" : "") + (hot ? " hot" : "") + (r.failed ? " failed" : "") + (liveMark(r.id) ? " cmp-" + liveMark(r.id) : "") + (drafted(r.dstDevice, r.dstChannel) ? " draft" : ""), stroke: color }, wiresLayer);
         clickable(path, { kind: "route", id: r.id }, null, null, d, 10);
         live.wires.push({ path, route: r });
         groupPaths.push(path);
@@ -469,6 +471,8 @@ function drawNode(n, groups) {
       const end = live.ends?.has(`${d.name}|${side}|${c.id}`);
       const picked = state.trace?.kind === "channel" && state.trace.device === d.name && state.trace.side === side && state.trace.ch === c.id;
       if (end || picked) el("rect", { x: side === "rx" ? 6 : W / 2, y: y - ROW / 2, width: W / 2 - 6, height: ROW, rx: 4, class: "row-traced" + (picked ? " picked" : "") }, g);
+      if (side === "rx" && drafted(d.name, c.id))
+        el("rect", { x: 6, y: y - ROW / 2, width: W / 2 - 6, height: ROW, rx: 4, class: "row-draft" }, g);
       if (side === "tx" && state.armed?.device === d.name && state.armed.ch === c.id)
         el("rect", { x: W / 2, y: y - ROW / 2, width: W / 2 - 6, height: ROW, rx: 4, class: "row-armed" }, g);
       const label = el("text", {
@@ -721,12 +725,15 @@ function clickable(elm, trace, _a, _b, d, hitWidth) {
     render();
   });
 }
+// A draft change on this (offline) view?
+const drafted = (dev, ch) => state.model?.source !== "live" && draft.base === state.model?.name && isDrafted(dev, ch);
+
 // ---------- Edit mode: click to patch, shift-click to cascade ----------
 // Click an output to pick it (no click card in Edit mode; turn Edit off to see an output's
 // card), then click an input to patch it there. Shift-click a patched
 // input or a wire to repeat that patch down the next X inputs. Nothing here works with Edit off.
 function editClick(trace, e) {
-  if (!edit.on || state.model?.source !== "live") return false;
+  if (!(draft.on || (edit.on && state.model?.source === "live"))) return false;
   if (trace.kind === "channel" && trace.side === "tx" && !e.shiftKey) {
     const same = state.armed?.device === trace.device && state.armed.ch === trace.ch;
     // No click card here: it would sit over the inputs you're about to click.
@@ -796,7 +803,10 @@ function cascade(r) {
   input.oninput = preview;
   preview();
   $("cascade-max").textContent = `up to ${max}`;
+  let finished = false;   // the button is the form's submit too: act once
   const finish = (go) => {
+    if (finished) return;
+    finished = true;
     dlg.close();
     if (!go) return;
     const plan = preview();
@@ -838,7 +848,7 @@ function updateTraceCard() {
   else html = bundleText(rs);
   const targets = historyTargets(t, rs);
   // In Edit mode, an input (or a single wire, for its input) gets patch controls.
-  const patchAt = !edit.on || state.model?.source !== "live" ? null
+  const patchAt = !(draft.on || (edit.on && state.model?.source === "live")) ? null
     : t.kind === "channel" && t.side === "rx" ? { device: t.device, ch: t.ch, route: rs[0] }
     : t.kind === "route" && rs[0] ? { device: rs[0].dstDevice, ch: rs[0].dstChannel, route: rs[0] } : null;
   // Solo: the output to listen to, from a clicked output, an input (its source) or a wire.
@@ -1148,6 +1158,7 @@ $("btn-save").onclick = saveSetup;
 function setModel(model, { keepLayout = false } = {}) {
   const first = !state.model || state.model.name !== model.name;
   state.model = model;
+  draftOnModel(model);                         // a draft for this view goes back on it
   state.routes = buildRoutes(model);
   model.devices.forEach((d, i) => { if (!state.colors.has(d.name)) state.colors.set(d.name, PALETTE[state.colors.size % PALETTE.length]); });
   if (first && !keepLayout) {
@@ -1254,6 +1265,34 @@ function goLive() {
 
 $("btn-live").onclick = () => (live$.wanted ? goOffline() : goLive());
 
+// ---------- offline patching: push a draft to the live network ----------
+async function pushDraft() {
+  let live = null;
+  try {
+    const res = await fetch("api/snapshot", { cache: "no-store" });
+    if (res.ok) live = await res.json();
+  } catch {}
+  if (!live || live.source !== "live") return showStatus("Pushing needs the live network: open the app, or start the server, on a computer on the Dante network.", true, 10000);
+  const { changes, skipped } = planPush(live, load(`dv.unitmap.${state.model.name}`, {}));
+  if (!changes.length) return showStatus(`Nothing can be pushed: ${skipped[0] || "no changes"}. Compare → Units matches units by hand.`, true, 12000);
+  if (!edit.on && !(await setEdit(true, { force: true }))) return;
+  const n = changes.length;
+  const res = await patch(changes, `push draft to ${live.name} (${n} input${n > 1 ? "s" : ""})`, { review: true, server: true });
+  if (!res) return;                                         // cancelled, or refused (status says why)
+  if ((res.applied?.length || res.note) && !res.failed?.length) {
+    clearDraft();
+    goLive();
+  }
+  if (skipped.length) showStatus(`${skipped.length} draft change${skipped.length > 1 ? "s" : ""} not pushed: ${skipped[0]}`, true, 12000);
+}
+
+initDraft({
+  model: () => state.model,
+  redraw: () => { state.routes = buildRoutes(state.model); render(); },
+  status: (text, error) => showStatus(text, error, 8000),
+  push: () => pushDraft(),
+});
+
 initSolo({
   model: () => state.model,
   editOn: () => edit.on,
@@ -1266,9 +1305,11 @@ initSolo({
 
 initEdit({
   canEdit: () => live$.wanted && state.model?.source === "live",
+  canDraft: () => !!state.model && state.model.source !== "live",
+  draftName: () => state.model?.name,
   status: (text, error) => showStatus(text, error, 8000),
   changed: () => {
-    if (!edit.on && state.armed) setArmed(null);
+    if (!editing() && state.armed) setArmed(null);
     render();
     refreshSolo();
     // With the daemon, the long poll brings the change the moment it lands; otherwise ask now.
