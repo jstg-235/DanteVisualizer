@@ -8,6 +8,10 @@ From the same record it notices dropouts: a channel that had signal, went silent
 few seconds, then came back. A receiving channel that went silent while its source kept
 sending is marked as lost on the way (a network problem rather than a quiet source).
 
+It also latches clips: any channel that reached full scale (-0.5 dBFS or louder) since
+monitoring started or since the last Clear clips is listed, with how many times it clipped
+and when it first and last did.
+
 Everything here is kept in memory only and reads nothing from devices: it just watches
 the levels that are already arriving.
 
@@ -22,6 +26,7 @@ import time
 
 SECONDS = 3600            # how much history to keep per channel
 SAMPLE_EVERY = 0.25       # seconds between samples of the levels
+CLIP_RAW = 1              # -0.5 dBFS and louder counts as clipping
 SIGNAL_RAW = 120          # -60 dBFS: at or above this level counts as signal
 NO_SIGNAL, NO_READING = 254, 255
 DROPOUT_MIN = 2           # a silence this long (seconds) or longer counts...
@@ -57,6 +62,9 @@ class LevelHistory:
         self.sec = None            # the second being filled
         self.dropouts = collections.deque(maxlen=MAX_DROPOUTS)
         self.recording = False     # were levels arriving at the last sample?
+        self.clips = {}            # (device, side, ch) -> {"count", "first", "last", "peak"}
+        self.clipping = set()      # channels clipping at the last sample (to count each clip once)
+        self.clips_since = time.time()
 
     def start(self):
         threading.Thread(target=self._run, name="level-history", daemon=True).start()
@@ -88,6 +96,7 @@ class LevelHistory:
             devices = (levels or {}).get("devices") or {}
             self.recording = bool(devices)
             slot = sec % SECONDS
+            clipping = set()
             for name, d in devices.items():
                 if not isinstance(d, dict) or d.get("stale"):
                     continue
@@ -98,11 +107,21 @@ class LevelHistory:
                         if t is None:
                             t = self.tracks[key] = _Track()
                         raw = db_to_raw(db)
+                        if raw <= CLIP_RAW:
+                            clipping.add(key)
+                            c = self.clips.get(key)
+                            if c is None:
+                                c = self.clips[key] = {"count": 1, "first": now, "last": now, "peak": db}
+                            elif key not in self.clipping and int(now) - int(c["last"]) > 1:
+                                c["count"] += 1      # a new clip, counted the way the strip chart does
+                            c["last"] = now
+                            c["peak"] = max(c["peak"], db)
                         cur = t.ring[slot]
                         # Keep the loudest reading of the second (a lower raw value is louder;
                         # "no signal" only replaces "no reading").
                         if cur == NO_READING or (raw != NO_SIGNAL and (cur == NO_SIGNAL or raw < cur)):
                             t.ring[slot] = raw
+            self.clipping = clipping
 
     def _close_second(self, sec):
         """Run dropout detection on the second that just finished."""
@@ -173,3 +192,20 @@ class LevelHistory:
     def clear_dropouts(self):
         with self.lock:
             self.dropouts.clear()
+
+    # ---- clips ----
+    def clip_map(self):
+        """{device: {"tx": {ch: {...}}, "rx": {ch: {...}}}} for every channel that clipped."""
+        out = {}
+        with self.lock:
+            for (device, side, ch), c in self.clips.items():
+                out.setdefault(device, {"tx": {}, "rx": {}})[side][str(ch)] = {
+                    "count": c["count"], "first": round(c["first"], 1), "last": round(c["last"], 1),
+                    "peak": c["peak"], "now": (device, side, ch) in self.clipping}
+            return {"since": round(self.clips_since, 1), "devices": out}
+
+    def clear_clips(self):
+        with self.lock:
+            self.clips.clear()
+            self.clipping = set()   # a clip still going on counts again as a new one
+            self.clips_since = time.time()
