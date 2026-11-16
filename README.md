@@ -41,7 +41,7 @@ Each Dante network gets its own **workspace**: the devices it has, its layout an
 - **Clear workspace** (in the workspace card, or File → Clear Workspace…) starts again from what's online now: it forgets the devices it expected, the monitor's problems and the levels. The layout and the solo output stay.
 - **Forget device**: an offline device's info panel, and the Missing list in the workspace card, can forget a device that has left the network for good.
 - **Two networks on two ports:** pick the port in the **Network** menu. Each port remembers its own workspace, and the menu shows the network each port was last on.
-- The first time, the workspace for the port in use takes over its old layout, solo monitor output and monitor history.
+- The first time, the workspace for the port in use takes over its old layout, solo monitor output and monitor history. A new workspace is named after the network's clock leader (without its serial-number tag); rename it in the workspace card.
 - Workspaces live in `~/Library/Application Support/Dante Visualizer/data/workspaces/` (never in this repository). Try it without devices: in the demo, the workspace card has **Move the cable to the other network**.
 
 ## Patching (Edit mode)

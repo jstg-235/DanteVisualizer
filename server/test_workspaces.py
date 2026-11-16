@@ -106,5 +106,32 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(again.get_layout(again.active("en9")["id"]), {"positions": {"a": 1}})
 
 
+    def test_named_after_the_clock_leader_the_monitor_hears_without_its_serial_tag(self):
+        names = ["AXCore-035b97", "Y001-Yamaha-DSP-R10-HY4-26a7da", "Fourier"]
+        ws = Workspaces(None, log=lambda m: None, settle=0, leader=lambda: "Y001-Yamaha-DSP-R10-HY4-26a7da")
+        out = ws.observe(model(names), "en11")
+        self.assertEqual(out["workspace"]["name"], "Y001-Yamaha-DSP-R10-HY4")
+
+    def test_first_workspace_waits_for_the_network_to_settle(self):
+        ws = Workspaces(None, log=lambda m: None, settle=60)
+        out = ws.observe(model(HY4), "en11")
+        self.assertIsNone(out["networkKey"])
+
+
+class HistoryMoveTests(unittest.TestCase):
+    def test_move_takes_over_or_carries_recent_events(self):
+        from monitor.engine import EventLog
+        with tempfile.TemporaryDirectory() as d:
+            log = EventLog(os.path.join(d, "old.sqlite"))
+            log.add("info", "x", "a", "before", ts=100)
+            log.add("info", "x", "b", "after start", ts=200)
+            log.move_to(os.path.join(d, "taken.sqlite"), take_over=True)
+            self.assertEqual(len(log.recent()), 2)
+            log.move_to(os.path.join(d, "carried.sqlite"), carry_since=150)
+            self.assertEqual([e["message"] for e in log.recent()], ["after start"])
+            log.add("info", "x", "c", "new")
+            self.assertEqual(len(log.recent()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

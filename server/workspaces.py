@@ -46,9 +46,10 @@ def _key(iface):
 
 
 class Workspaces:
-    def __init__(self, data_dir=None, log=print, settle=SETTLE_S):
+    def __init__(self, data_dir=None, log=print, settle=SETTLE_S, leader=None):
         self.dir = Path(data_dir) / "workspaces" if data_dir else None
         self.log = log
+        self.leader_fn = leader or (lambda: None)   # the clock leader the monitor hears, by name
         self.settle = settle
         self.lock = threading.RLock()
         self.data = {"version": 1, "workspaces": {}, "active": {}}
@@ -163,12 +164,23 @@ class Workspaces:
         mac = macs.get(name)
         return bool(mac and any(e.get("mac") == mac for e in exp.values()))
 
-    @staticmethod
-    def suggest_name(model, names):
-        """A first name for a new workspace: the clock leader, else the first device."""
-        leader = Workspaces._leader(model)
+    def current_leader(self, model, names):
+        """The clock leader, from the network itself or else from the monitor's clock listener."""
+        leader = self._leader(model)
+        if not leader:
+            try:
+                heard = self.leader_fn()
+            except Exception:
+                heard = None
+            leader = heard if heard in names else None
+        return leader
+
+    def suggest_name(self, model, names):
+        """A first name for a new workspace: the clock leader, else the first device. A trailing
+        serial-number tag (Y001-Yamaha-DSP-R10-HY4-26a7da) is left off."""
+        leader = self.current_leader(model, names)
         base = leader or (sorted(names, key=str.lower)[0] if names else "Network")
-        return base[:60]
+        return re.sub(r"-[0-9a-f]{6}$", "", base)[:60] or base[:60]
 
     def _create(self, name, names, macs, leader, iface):
         ws_id = uuid.uuid4().hex[:12]
@@ -197,7 +209,9 @@ class Workspaces:
                 self.suggest.pop(k, None)
             settled = now - seen["since"] >= self.settle
             ws = self.active(iface)
-            if ws is None and names and (settled or not self.data["workspaces"]):
+            # Even the very first workspace waits for the network to settle, so the clock
+            # leader is known to name it after.
+            if ws is None and names and settled:
                 ws, legacy = self._first(model, names, macs, iface)
             elif ws is not None and settled and names:
                 self._judge(ws, model, names, macs, k)
@@ -225,7 +239,7 @@ class Workspaces:
             self.log(f"workspaces: {ws['name']} on {_key(iface)}")
             return ws, None
         if not self.data["workspaces"]:
-            ws = self._create(self.suggest_name(model, names), names, macs, self._leader(model), iface)
+            ws = self._create(self.suggest_name(model, names), names, macs, self.current_leader(model, names), iface)
             self.data["active"][_key(iface)] = ws["id"]
             self._save()
             self.log(f"workspaces: started {ws['name']} for {_key(iface)}")
