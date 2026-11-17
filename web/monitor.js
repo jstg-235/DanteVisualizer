@@ -319,6 +319,7 @@ async function loadSetup() {
   try { setup = await (await fetch("api/monitor/setup", { cache: "no-store" })).json(); } catch { return; }
   $("m-iface").textContent = setup.demo ? "Demo network" : setup.interface || "not found yet";
   $("m-notif").checked = !!setup.notifications;
+  $("m-clock").checked = !!setup.clock_listen;
   $("m-swtype").innerHTML = Object.entries(setup.switch_types).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join("");
   swTypeChanged();
   const st = Object.fromEntries((mon?.switches || []).map((s) => [s.id, s]));
@@ -430,6 +431,10 @@ export function initMonitor(o) {
   $("m-notif").onchange = async () => {
     const r = await post("api/monitor/notifications", { on: $("m-notif").checked });
     $("m-notif").checked = !!r.notifications;
+  };
+  $("m-clock").onchange = async () => {
+    const r = await post("api/monitor/clock", { on: $("m-clock").checked });
+    $("m-clock").checked = !!r.clock_listen;
   };
   $("m-swtest").onclick = async () => {
     const f = swForm();

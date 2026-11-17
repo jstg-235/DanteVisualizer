@@ -78,7 +78,10 @@ class EventLog:
 
 
 class Config:
-    DEFAULTS = {"interface_ip": "", "switches": [], "notifications": False, "switch_poll_seconds": 10}
+    DEFAULTS = {"interface_ip": "", "switches": [], "notifications": False, "switch_poll_seconds": 10,
+                # Off by default: binding the PTP ports 319/320 stops Dante Controller (and
+                # Dante Virtual Soundcard) from using them on this Mac.
+                "clock_listen": False}
 
     def __init__(self, path):
         self.path = path
@@ -146,6 +149,9 @@ class Engine:
         self.auto_ip = ip
         self.discovery = DanteDiscovery(ip, log=print)
         self.discovery.start()
+        if not self.config.data.get("clock_listen"):
+            self.ptp = None
+            return
         self.ptp = PtpMonitor(ip, log=print)
         self.ptp.start()
         if self.ptp.error:
@@ -163,6 +169,24 @@ class Engine:
             time.sleep(1.2)
             self._start_listeners()
         self.log("info", "monitor", "Dante Monitor", "Listening on network interface %s." % (ip or "auto"))
+
+    def set_clock_listen(self, on):
+        """Turn the passive clock (PTP) listener on or off and save the choice."""
+        self.config.data["clock_listen"] = bool(on)
+        self.config.save()
+        if self.demo or not self.running:
+            return
+        if self.ptp:
+            self.ptp.stop()
+            self.ptp = None
+        if on:
+            time.sleep(1.2)
+            self.ptp = PtpMonitor(self.auto_ip, log=print)
+            self.ptp.start()
+            if self.ptp.error:
+                self.log("warning", "clock", "Clock listener", self.ptp.error +
+                         " (Is Dante Controller, Dante Virtual Soundcard or another monitor using the clock ports?)")
+        self.log("info", "monitor", "Dante Monitor", "Clock listening turned %s." % ("on" if on else "off"))
 
     def follow_interface(self, ip):
         """Listen on the port Dante Visualizer is using, unless one was chosen in the
@@ -317,7 +341,9 @@ class Engine:
     def evaluate(self, now=None):
         now = now or time.time()
         found = self.discovery.devices() if self.discovery else {}
-        clock = self.ptp.snapshot(now) if self.ptp else {"v1_active": [], "v2_active": [], "v1_sources": []}
+        clock = self.ptp.snapshot(now) if self.ptp else {
+            "listening": False, "v1_active": [], "v2_active": [], "v1_sources": [], "v2_sources": [],
+            "error": "Clock listening is off. You can turn it on in Setup."}
         new_issues = {}
 
         def issue(key, severity, subject, message, devices=None):

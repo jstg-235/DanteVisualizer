@@ -54,7 +54,7 @@ def import_old_app(data_dir, old_dir=OLD_APP_DIR):
     try:
         with open(os.path.join(old_dir, "config.json")) as f:
             old = json.load(f)
-        cfg = {"interface_ip": "", "notifications": False,
+        cfg = {"interface_ip": "", "notifications": False, "clock_listen": False,
                "switches": old.get("switches") or [], "switch_poll_seconds": old.get("switch_poll_seconds", 10)}
         with open(os.path.join(data_dir, "config.json"), "w") as f:
             json.dump(cfg, f, indent=2)
@@ -326,6 +326,7 @@ class MonitorService:
                                  for k, v in SWITCH_TYPES.items()},
                 "switches": e.config.data["switches"],
                 "notifications": bool(e.config.data.get("notifications", False)),
+                "clock_listen": bool(e.config.data.get("clock_listen", False)),
                 "demo": bool(e.demo),
                 "demoNetwork": self.world.network if self.world else None,
             }, None
@@ -345,6 +346,9 @@ class MonitorService:
             e.config.data["notifications"] = bool(b.get("on"))
             e.config.save()
             return 200, {"ok": True, "notifications": e.config.data["notifications"]}
+        if path == "/api/monitor/clock":
+            e.set_clock_listen(bool(b.get("on")))
+            return 200, {"ok": True, "clock_listen": e.config.data["clock_listen"]}
         if path == "/api/monitor/switches/test":
             stype = b.get("type") if b.get("type") in SWITCH_TYPES else "generic"
             community = str(b.get("community") or SWITCH_TYPES[stype]["community"])
