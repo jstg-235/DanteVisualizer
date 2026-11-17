@@ -5,7 +5,8 @@
 #   mac/build_app.sh --install   also copies it to ~/Applications
 #
 # The app carries the web page, server and engine scripts in Contents/Resources/engine.
-# On first launch it makes its own Python environment with netaudio in
+# With DV_EMBED_PYTHON=1 it also carries its own Python with netaudio (see embed_python.sh).
+# Without it, on first launch it makes a Python environment with netaudio in
 # ~/Library/Application Support/Dante Visualizer/venv (needs Python 3.10+ from python.org
 # and an internet connection once).
 set -euo pipefail
@@ -24,6 +25,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/engine"
 cp "$BIN" "$APP/Contents/MacOS/DanteVisualizer"
 rsync -a --exclude '.venv' --exclude '__pycache__' --exclude '*.json' --exclude '*.log' --exclude '*.pcap' \
   "$ROOT/web" "$ROOT/server" "$ROOT/probe" "$ROOT/requirements.txt" "$APP/Contents/Resources/engine/"
+
+# DV_EMBED_PYTHON=1 builds Python and netaudio into the app (release builds do this).
+if [[ "${DV_EMBED_PYTHON:-0}" == 1 ]]; then
+  ./embed_python.sh "$APP"
+fi
 
 # App icon: mac/AppIcon.png (1024 px) → AppIcon.icns with the built-in sips and iconutil.
 if [[ -f AppIcon.png ]]; then
@@ -48,7 +54,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>DanteVisualizer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>0.4</string>
+  <key>CFBundleShortVersionString</key><string>0.5</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>

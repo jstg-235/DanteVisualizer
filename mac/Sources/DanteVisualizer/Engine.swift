@@ -25,7 +25,12 @@ final class Engine {
     let supportDir: URL
     var dataDir: URL { supportDir.appendingPathComponent("data") }
     var logsDir: URL { supportDir.appendingPathComponent("logs") }
-    var venvDir: URL { supportDir.appendingPathComponent("venv") }
+    /// Release builds carry their own Python with netaudio in Contents/Resources/python.
+    var bundledPython: URL { engineDir.deletingLastPathComponent().appendingPathComponent("python") }
+    var hasBundledPython: Bool {
+        FileManager.default.isExecutableFile(atPath: bundledPython.appendingPathComponent("bin/python3").path)
+    }
+    var venvDir: URL { hasBundledPython ? bundledPython : supportDir.appendingPathComponent("venv") }
     var venvPython: URL { venvDir.appendingPathComponent("bin/python3") }
 
     private(set) var port: Int = 0
@@ -185,6 +190,13 @@ final class Engine {
         env["DV_DATA"] = dataDir.path
         env["DV_ENGINE"] = engineDir.path
         env["PYTHONUNBUFFERED"] = "1"
+        if hasBundledPython {
+            // Never write into the signed app, and ignore any Python the person has set up.
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["PYTHONNOUSERSITE"] = "1"
+            env.removeValue(forKey: "PYTHONPATH")
+            env.removeValue(forKey: "PYTHONHOME")
+        }
         if let iface = interfaceOverride { env["DANTE_IF"] = iface } else { env.removeValue(forKey: "DANTE_IF") }
         // Apps launched from Finder get a minimal PATH.
         env["PATH"] = [venvDir.appendingPathComponent("bin").path, "/usr/local/bin", "/opt/homebrew/bin",
@@ -382,6 +394,7 @@ final class Engine {
     /// Makes ~/Library/Application Support/Dante Visualizer/venv with the packages in
     /// engine/requirements.txt, the first time only (or when requirements change).
     private func ensurePythonEnvironment() throws {
+        if hasBundledPython { return }
         let req = engineDir.appendingPathComponent("requirements.txt")
         let reqText = (try? String(contentsOf: req, encoding: .utf8)) ?? ""
         let stamp = venvDir.appendingPathComponent(".requirements")

@@ -21,12 +21,19 @@ if [[ -z "$SIGN_ID" ]]; then
 fi
 echo "Signing identity: $SIGN_ID"
 
-DV_BUNDLE_ID=${DV_BUNDLE_ID:-com.newconstellation.dantevisualizer} ./build_app.sh
+DV_EMBED_PYTHON=1 DV_BUNDLE_ID=${DV_BUNDLE_ID:-com.newconstellation.dantevisualizer} ./build_app.sh
 APP="build/Dante Visualizer.app"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")
 DMG="build/Dante Visualizer $VERSION.dmg"
 
 echo "Signing with Developer ID (hardened runtime)…"
+# Every native file inside (Python, its extension modules, netaudio's daemon) first, then the app.
+find "$APP/Contents/Resources" -type f \( -perm +111 -o -name '*.so' -o -name '*.dylib' \) -print0 |
+  while IFS= read -r -d '' f; do
+    if file -b "$f" | grep -q Mach-O; then
+      codesign --force --options runtime --timestamp --entitlements entitlements.plist --sign "$SIGN_ID" "$f"
+    fi
+  done
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP/Contents/MacOS/DanteVisualizer"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
