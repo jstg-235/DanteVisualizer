@@ -44,7 +44,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Dante Visualizer</string>
   <key>CFBundleDisplayName</key><string>Dante Visualizer</string>
-  <key>CFBundleIdentifier</key><string>local.dantevisualizer.app</string>
+  <key>CFBundleIdentifier</key><string>${DV_BUNDLE_ID:-local.dantevisualizer.app}</string>
   <key>CFBundleExecutable</key><string>DanteVisualizer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
